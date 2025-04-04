@@ -32,18 +32,17 @@ func MonitorProcess(pid int, memoryLimitKB int64, timeoutDuration time.Duration,
 
 	// 确保进程ID有效
 	if pid <= 0 {
-		log.Printf("错误: 无效的进程ID: %d", pid)
+		ErrorLog("无效的进程ID: %d", pid)
 		return stats
 	}
 
 	// 确保超时值有效
 	if timeoutDuration <= 0 {
-		log.Printf("警告: 无效的超时设置: %v, 使用默认值", timeoutDuration)
+		WarnLog("无效的超时设置: %v, 使用默认值", timeoutDuration)
 		timeoutDuration = 10 * time.Second // 使用安全的默认值
 	}
 
-	log.Printf("Process: 最终超时设置为 %.3f 秒 (即 %v)", 
-		timeoutDuration.Seconds(), timeoutDuration)
+	DebugLog("开始监控进程 %d，超时设置: %.2f秒", pid, timeoutDuration.Seconds())
 	
 	// 创建同步组，确保资源监控正确完成
 	var wg sync.WaitGroup
@@ -56,26 +55,24 @@ func MonitorProcess(pid int, memoryLimitKB int64, timeoutDuration time.Duration,
 		defer wg.Done()
 		
 		 // 记录实际启动时间
-		timerStart := time.Now()
 		timer := time.NewTimer(timeoutDuration)
 		defer timer.Stop()
 		
 		select {
 		case <-timer.C:
-			actualWait := time.Since(timerStart)
 			mutex.Lock()
 			elapsed := time.Since(startTime)
-			log.Printf("超时计时器触发: 实际等待 %.3f秒, 设定值 %.3f秒",
-				actualWait.Seconds(), timeoutDuration.Seconds())
+			InfoLog("进程 %d 超时: %.2f秒 (限制: %.2f秒)", 
+				pid, elapsed.Seconds(), timeoutDuration.Seconds())
 			stats.IsTimeout = true
 			stats.Duration = elapsed
 			
 			// 强制终止进程树
 			killErr := terminateProcessTree(pid)
 			if killErr != nil {
-				log.Printf("终止进程 %d 时发生错误: %v", pid, killErr)
+				ErrorLog("终止进程 %d 时发生错误: %v", pid, killErr)
 			} else {
-				log.Printf("成功终止进程 %d 和其子进程", pid)
+				DebugLog("成功终止进程 %d 和其子进程", pid)
 			}
 			mutex.Unlock()
 			
@@ -115,10 +112,10 @@ func MonitorProcess(pid int, memoryLimitKB int64, timeoutDuration time.Duration,
 				stats.Duration = elapsed
 				
 				 // 定期记录进程状态
-				if int(elapsed.Seconds()) > 0 && 
+				if DebugMode && int(elapsed.Seconds()) > 0 && 
 				   int(elapsed.Seconds()) % 1 == 0 && 
 				   int(elapsed.Seconds()) != int((elapsed - interval).Seconds()) {
-					log.Printf("进程 %d 已运行: %.1f秒 (限制: %.1f秒)", 
+					DebugLog("进程 %d 已运行: %.1f秒 (限制: %.1f秒)", 
 						pid, elapsed.Seconds(), timeoutDuration.Seconds())
 				}
 				
@@ -127,15 +124,22 @@ func MonitorProcess(pid int, memoryLimitKB int64, timeoutDuration time.Duration,
 				if err == nil && memKB > stats.MemoryKB {
 					stats.MemoryKB = memKB
 					
-					// 检查内存限制
-					if memoryLimitKB > 0 && stats.MemoryKB > memoryLimitKB {
-						log.Printf("进程 %d 内存超限: %d KB > %d KB", 
-							pid, stats.MemoryKB, memoryLimitKB)
-						stats.IsExceeded = true
-						_ = terminateProcessTree(pid)
-						mutex.Unlock()
-						return
+					// 仅在调试模式下记录内存使用情况
+					if DebugMode && int(elapsed.Seconds()) > 0 && int(elapsed.Seconds()) % 2 == 0 &&
+					   int(elapsed.Seconds()) != int((elapsed - interval).Seconds()) {
+						DebugLog("进程 %d 内存使用: %d KB (%.2f MB)", 
+							pid, memKB, float64(memKB)/1024)
 					}
+				}
+				
+				// 检查内存限制
+				if memoryLimitKB > 0 && stats.MemoryKB > memoryLimitKB {
+					InfoLog("进程 %d 内存超限: %d KB > %d KB", 
+						pid, stats.MemoryKB, memoryLimitKB)
+					stats.IsExceeded = true
+					_ = terminateProcessTree(pid)
+					mutex.Unlock()
+					return
 				}
 				
 				mutex.Unlock()
@@ -152,7 +156,7 @@ func MonitorProcess(pid int, memoryLimitKB int64, timeoutDuration time.Duration,
 	// 等待所有监控goroutine完成
 	go func() {
 		wg.Wait()
-		log.Printf("进程 %d 的所有监控任务已完成", pid)
+		DebugLog("进程 %d 的监控任务已完成", pid)
 	}()
 
 	return stats
@@ -311,12 +315,12 @@ func getProcessAndChildrenMemoryKB(pid int) (int64, error) {
 	
 	// 如果是Java或Python等解释型语言，尝试查找子进程
 	children, err := getChildProcesses(pid)
-	if err == nil {
+	if err == nil && len(children) > 0 {
 		for _, childPid := range children {
 			childMem, err := getProcessMemoryKB(childPid)
 			if err == nil && childMem > 0 {
 				memKB += childMem // 累加子进程内存
-				log.Printf("子进程 %d 内存使用: %d KB", childPid, childMem)
+				DebugLog("子进程 %d 内存使用: %d KB", childPid, childMem)
 			}
 		}
 	}

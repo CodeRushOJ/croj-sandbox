@@ -24,6 +24,8 @@ var (
 	memLimit   = flag.Int("mem", 512, "内存限制（MB）")
 	apiURL     = flag.String("api", "", "远程API URL (如果提供，则使用远程执行，否则使用本地执行)")
 	verbose    = flag.Bool("v", false, "详细模式，显示更多调试信息")
+	jsonOutput = flag.Bool("json", true, "以JSON格式输出结果")
+	debug      = flag.Bool("debug", false, "启用调试日志")
 )
 
 // 从文件扩展名推断语言
@@ -47,6 +49,15 @@ func inferLanguage(filename string) string {
 
 func main() {
 	flag.Parse()
+	
+	// 初始化调试模式
+	if *debug || *verbose {
+		util.DebugMode = true
+		os.Setenv("CROJ_DEBUG", "true")
+	} else {
+		// 也检查环境变量
+		util.InitDebugMode()
+	}
 	
 	// 设置日志格式
 	log.SetFlags(log.Ldate | log.Ltime)
@@ -116,6 +127,16 @@ func main() {
 	} else {
 		// 本地执行
 		response = executeLocal(request)
+	}
+	
+	// 如果指定了JSON输出模式，则直接输出JSON
+	if *jsonOutput {
+		prettyJSON, err := json.MarshalIndent(response, "", "  ")
+		if err != nil {
+			log.Fatalf("序列化结果失败: %v", err)
+		}
+		fmt.Println(string(prettyJSON))
+		return
 	}
 	
 	// 打印结果
