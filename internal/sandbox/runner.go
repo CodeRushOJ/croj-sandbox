@@ -42,7 +42,7 @@ func (r *Runner) Run(ctx context.Context, language, sourceCode string, stdinData
 
 // RunWithConfig 使用自定义配置运行代码
 func (r *Runner) RunWithConfig(ctx context.Context, language, sourceCode string, stdinData *string, expectedOutput *string, cfg Config) Result {
-	log.Printf("Runner: 接收到的执行超时设置: %.2f秒, 用户指定: %v", 
+	util.DebugLog("Runner: 执行超时设置: %.2f秒, 用户指定: %v", 
 		cfg.DefaultExecuteTimeLimit.Seconds(), cfg.UserSpecifiedTimeout)
 	
 	// 1. Get Language Configuration
@@ -56,7 +56,7 @@ func (r *Runner) RunWithConfig(ctx context.Context, language, sourceCode string,
 	// 2. Setup temporary directory
 	hostRunDir, cleanup, err := util.SetupHostRunDir(cfg.HostTempDir)
 	if err != nil {
-		log.Printf("Error setting up host run dir: %v", err)
+		util.ErrorLog("创建临时目录失败: %v", err)
 		return NewResult(StatusSandboxError, fmt.Errorf("%w: %w", ErrHostTempDir, err))
 	}
 	defer cleanup()
@@ -145,14 +145,13 @@ func (r *Runner) RunWithConfig(ctx context.Context, language, sourceCode string,
 	}
 
 	// --- 5. Execute Step ---
-	log.Printf("[%s] Starting execution phase.", language)
+	util.InfoLog("[%s] 开始执行阶段", language)
 	memLimitBytes := langCfg.GetMemoryLimit(cfg.DefaultExecuteMemoryLimit)
 	memLimitKB := memLimitBytes / 1024
-	log.Printf("[%s] Setting memory limit: %d KB", language, memLimitKB)
 	
 	// 从语言配置中获取运行时间限制，但考虑用户是否指定了超时
 	timeoutDuration := langCfg.GetExecuteTimeout(cfg.DefaultExecuteTimeLimit, cfg.UserSpecifiedTimeout)
-	log.Printf("[%s] Setting time limit: %.2f seconds (user specified: %v)", 
+	util.DebugLog("[%s] 设置时间限制: %.2f秒 (用户指定: %v)", 
 		language, timeoutDuration.Seconds(), cfg.UserSpecifiedTimeout)
 	
 	// 处理命令模板
@@ -173,7 +172,7 @@ func (r *Runner) RunWithConfig(ctx context.Context, language, sourceCode string,
 	// 确保超时设置被正确传递到执行器
 	runCfg := cfg
 	runCfg.DefaultExecuteTimeLimit = timeoutDuration
-	log.Printf("[%s] Final timeout for executor: %.2f seconds", language, runCfg.DefaultExecuteTimeLimit.Seconds())
+	util.DebugLog("[%s] 传递到执行器的超时设置: %.2f seconds", language, runCfg.DefaultExecuteTimeLimit.Seconds())
 	
 	executor := NewExecutor(runCfg)
 	execResult := executor.Execute(ctx, runCmdParts, langCfg.Run.Env, stdinData)
@@ -201,7 +200,7 @@ func (r *Runner) RunWithConfig(ctx context.Context, language, sourceCode string,
 		log.Printf("[%s] Skipping output comparison (execution status is %s, not Accepted)", language, execResult.Status)
 	}
 
-	log.Printf("[%s] Final result status: %s", language, execResult.Status)
+	util.InfoLog("[%s] 最终执行结果: %s", language, execResult.Status)
 	return execResult
 }
 

@@ -34,7 +34,7 @@ func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]
 		return NewResult(StatusSandboxError, fmt.Errorf("empty command provided to executor"))
 	}
 
-	log.Printf("Executing: %v", runCmd)
+	util.DebugLog("执行命令: %v", runCmd)
 	execCmd := exec.CommandContext(ctx, runCmd[0], runCmd[1:]...)
 
 	// Set environment variables if provided
@@ -74,11 +74,11 @@ func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]
 	// 确保有合理的默认值
 	if execTimeout <= 0 {
 		execTimeout = 3 * time.Second
-		log.Printf("警告: 超时设置为0或负值，使用默认值 %.2f秒", execTimeout.Seconds())
+		util.WarnLog("超时设置为0或负值，使用默认值 %.2f秒", execTimeout.Seconds())
 	}
 	
-	// 打印真正使用的超时设置
-	log.Printf("Executor: 最终时间限制设置: %.2f秒", execTimeout.Seconds())
+	// 仅在调试模式下打印超时设置
+	util.DebugLog("Executor: 使用超时设置: %.2f秒", execTimeout.Seconds())
 	
 	// Execute the command
 	startTime := time.Now()
@@ -92,9 +92,9 @@ func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]
 	pid := execCmd.Process.Pid
 	memLimitKB := e.cfg.DefaultExecuteMemoryLimit / 1024 // 从bytes转换为KB
 	
-	// 更直观的日志输出，显示精确的超时值
-	log.Printf("开始监控进程 %d: 内存限制 %d KB (%.2f MB), 时间限制 %.2f 秒", 
-		pid, memLimitKB, float64(memLimitKB)/1024, execTimeout.Seconds())
+	// 内存和时间限制信息只需简要展示
+	util.InfoLog("监控进程 %d: 内存限制 %.2f MB, 时间限制 %.2f 秒", 
+		pid, float64(memLimitKB)/1024, execTimeout.Seconds())
 	
 	// 创建监控通道
 	monitorDone := make(chan struct{})
