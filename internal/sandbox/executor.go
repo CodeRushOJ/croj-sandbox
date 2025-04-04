@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/CodeRushOJ/croj-sandbox/internal/util"
+	"github.com/CodeRushOJ/croj-sandbox/internal/security"
 )
 
 // Executor handles executing commands with appropriate resource limits.
@@ -95,6 +96,22 @@ func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]
 	// 内存和时间限制信息只需简要展示
 	util.InfoLog("监控进程 %d: 内存限制 %.2f MB, 时间限制 %.2f 秒", 
 		pid, float64(memLimitKB)/1024, execTimeout.Seconds())
+	
+	// 创建安全配置文件
+	secProfile := security.ProfileForLanguage(e.cfg.Language)
+	
+	// 设置内存限制
+	secProfile.MemoryLimitBytes = e.cfg.DefaultExecuteMemoryLimit
+	
+	// 应用安全限制和资源隔离
+	if err := security.SetupSecurity(secProfile, pid, ""); err != nil {
+		util.WarnLog("应用安全限制失败: %v", err)
+	} else {
+		util.DebugLog("已应用Linux安全限制")
+	}
+	
+	// 注册执行结束时的清理函数
+	defer security.Cleanup()
 	
 	// 创建监控通道
 	monitorDone := make(chan struct{})
