@@ -1,7 +1,9 @@
 // internal/sandbox/config.go
 package sandbox
 
-import "time"
+import (
+    "time"
+)
 
 // Command template placeholders
 const (
@@ -55,7 +57,14 @@ func (lc *LanguageConfig) GetCompileTimeout(defaultTimeout time.Duration) time.D
 }
 
 // GetExecuteTimeout returns the execution timeout, using default if not set
-func (lc *LanguageConfig) GetExecuteTimeout(defaultTimeout time.Duration) time.Duration {
+// userSpecified 参数表示用户是否指定了自定义超时
+func (lc *LanguageConfig) GetExecuteTimeout(defaultTimeout time.Duration, userSpecified ...bool) time.Duration {
+	// 如果用户指定了超时并且第一个布尔参数为true，则优先使用用户指定的值
+	if len(userSpecified) > 0 && userSpecified[0] {
+		return defaultTimeout
+	}
+	
+	// 否则检查语言配置
 	if lc.Run.TimeoutSec <= 0 {
 		return defaultTimeout
 	}
@@ -85,6 +94,9 @@ type Config struct {
 	CompileTimeout         time.Duration  // 兼容字段
 	ExecTimeout            time.Duration  // 兼容字段
 	SrcFileName            string         // 兼容字段
+
+	// 是否使用用户指定的超时（优先级高于语言配置）
+	UserSpecifiedTimeout bool
 }
 
 // DefaultConfig returns a new Config struct with default values and language settings.

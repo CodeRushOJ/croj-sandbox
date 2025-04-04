@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"time"
 
 	"github.com/CodeRushOJ/croj-sandbox/internal/util" // Import util which now includes compare
@@ -37,18 +36,25 @@ func NewRunner(cfg Config) (*Runner, error) {
 }
 
 // Run compiles and executes source code for a given language locally using LanguageConfig.
-// expectedOutput: Optional string containing the expected standard output for comparison. If nil, comparison is skipped.
-func (r *Runner) Run(ctx context.Context, language, sourceCode string, stdinData *string, expectedOutput *string) Result { // Added expectedOutput
+func (r *Runner) Run(ctx context.Context, language, sourceCode string, stdinData *string, expectedOutput *string) Result {
+	return r.RunWithConfig(ctx, language, sourceCode, stdinData, expectedOutput, r.cfg)
+}
+
+// RunWithConfig 使用自定义配置运行代码
+func (r *Runner) RunWithConfig(ctx context.Context, language, sourceCode string, stdinData *string, expectedOutput *string, cfg Config) Result {
+	log.Printf("Runner: 接收到的执行超时设置: %.2f秒, 用户指定: %v", 
+		cfg.DefaultExecuteTimeLimit.Seconds(), cfg.UserSpecifiedTimeout)
+	
 	// 1. Get Language Configuration
-	langCfg, ok := r.cfg.Languages[language]
-	if !ok {
+	langCfg, ok := cfg.Languages[language]
+	if (!ok) {
 		err := fmt.Errorf("language configuration for '%s' not found", language)
 		log.Printf("%v", err)
 		return NewResult(StatusSandboxError, err)
 	}
 
 	// 2. Setup temporary directory
-	hostRunDir, cleanup, err := util.SetupHostRunDir(r.cfg.HostTempDir)
+	hostRunDir, cleanup, err := util.SetupHostRunDir(cfg.HostTempDir)
 	if err != nil {
 		log.Printf("Error setting up host run dir: %v", err)
 		return NewResult(StatusSandboxError, fmt.Errorf("%w: %w", ErrHostTempDir, err))
@@ -140,12 +146,20 @@ func (r *Runner) Run(ctx context.Context, language, sourceCode string, stdinData
 
 	// --- 5. Execute Step ---
 	log.Printf("[%s] Starting execution phase.", language)
-	memLimitBytes := langCfg.GetMemoryLimit(r.cfg.DefaultExecuteMemoryLimit)
+	memLimitBytes := langCfg.GetMemoryLimit(cfg.DefaultExecuteMemoryLimit)
 	memLimitKB := memLimitBytes / 1024
+	log.Printf("[%s] Setting memory limit: %d KB", language, memLimitKB)
+	
+	// 从语言配置中获取运行时间限制，但考虑用户是否指定了超时
+	timeoutDuration := langCfg.GetExecuteTimeout(cfg.DefaultExecuteTimeLimit, cfg.UserSpecifiedTimeout)
+	log.Printf("[%s] Setting time limit: %.2f seconds (user specified: %v)", 
+		language, timeoutDuration.Seconds(), cfg.UserSpecifiedTimeout)
+	
+	// 处理命令模板
 	runPlaceholders := map[string]string{
 		PlaceholderExePath: compiledExePath, PlaceholderWorkDir: hostRunDir,
 		PlaceholderSrcPath: sourceFilePath, PlaceholderExeDir: filepath.Dir(compiledExePath),
-		PlaceholderMaxMemory: strconv.FormatInt(memLimitKB, 10),
+		PlaceholderMaxMemory: fmt.Sprintf("%d", memLimitKB),
 	}
 	runCmdParts, templateErr := util.ProcessCommandTemplate(langCfg.Run.Command, runPlaceholders)
 	if templateErr != nil {
@@ -155,8 +169,14 @@ func (r *Runner) Run(ctx context.Context, language, sourceCode string, stdinData
 		res.CompileOutput = compileOutput
 		return res
 	}
-	// execTimeout := r.cfg.DefaultExecuteTimeLimit
-	execResult := r.executor.Execute(ctx, runCmdParts, langCfg.Run.Env, stdinData)
+	
+	// 确保超时设置被正确传递到执行器
+	runCfg := cfg
+	runCfg.DefaultExecuteTimeLimit = timeoutDuration
+	log.Printf("[%s] Final timeout for executor: %.2f seconds", language, runCfg.DefaultExecuteTimeLimit.Seconds())
+	
+	executor := NewExecutor(runCfg)
+	execResult := executor.Execute(ctx, runCmdParts, langCfg.Run.Env, stdinData)
 	execResult.CompileOutput = compileOutput // Add compile output regardless of exec status
 
 	// --- 6. Output Comparison Step ---
