@@ -15,6 +15,7 @@ type Request struct {
 	Language       string  `json:"language"`       // Programming language (default: "go")
 	Stdin          *string `json:"stdin"`          // Optional standard input
 	Timeout        *int    `json:"timeout"`        // Optional custom timeout in seconds
+	MemoryLimit    *int    `json:"memoryLimit"`    // Optional memory limit in MB
 	ExpectedOutput *string `json:"expectedOutput"` // Optional expected output for comparison
 }
 
@@ -26,6 +27,7 @@ type Response struct {
 	Stderr       string `json:"stderr"`       // Standard error content
 	Error        string `json:"error"`        // Error message if any
 	TimeUsed     int64  `json:"timeUsed"`     // Execution time in milliseconds
+	MemoryUsed   int64  `json:"memoryUsed"`   // Memory usage in KB
 	CompileError string `json:"compileError"` // Compilation error if any
 }
 
@@ -74,12 +76,43 @@ func (api *SandboxAPI) Execute(req Request) Response {
 	}
 	
 	// 应用自定义超时（如果提供）
+	var userSpecifiedTimeout bool = false
 	if req.Timeout != nil && *req.Timeout > 0 {
 		customTimeout := time.Duration(*req.Timeout) * time.Second
 		// 不超过合理限制
 		if customTimeout <= 30*time.Second {
 			execTimeout = customTimeout
+			userSpecifiedTimeout = true
+			log.Printf("API: 使用用户指定的超时: %.2f秒", execTimeout.Seconds())
 		}
+	}
+	
+	// 应用自定义内存限制（如果提供）
+	memoryLimit := api.cfg.DefaultExecuteMemoryLimit
+	if req.MemoryLimit != nil && *req.MemoryLimit > 0 {
+		// 转换 MB 到 bytes
+		customMemLimit := int64(*req.MemoryLimit) * 1024 * 1024
+		// 不超过合理上限（例如 4GB）
+		if customMemLimit <= 4*1024*1024*1024 {
+			memoryLimit = customMemLimit
+		} else {
+			log.Printf("请求的内存限制 %d MB 超出最大允许值，使用上限 4GB", *req.MemoryLimit)
+			memoryLimit = 4 * 1024 * 1024 * 1024
+		}
+	}
+
+	// 创建新的配置副本，而不是修改原始配置
+	customCfg := Config{
+		Languages:               api.cfg.Languages,
+		HostTempDir:             api.cfg.HostTempDir,
+		DefaultCompileTimeLimit: api.cfg.DefaultCompileTimeLimit,
+		DefaultExecuteTimeLimit: execTimeout, // 使用自定义超时
+		DefaultExecuteMemoryLimit: memoryLimit, // 使用自定义内存限制
+		CompileTimeout:          api.cfg.CompileTimeout,
+		ExecTimeout:             execTimeout, // 兼容性字段也更新
+		MaxStdoutSize:           api.cfg.MaxStdoutSize,
+		MaxStderrSize:           api.cfg.MaxStderrSize,
+		UserSpecifiedTimeout:    userSpecifiedTimeout, // 添加新字段标记用户是否指定了超时
 	}
 	
 	// Create context with timeout (估计编译时间+执行时间+额外缓冲)
@@ -87,11 +120,13 @@ func (api *SandboxAPI) Execute(req Request) Response {
 	if api.cfg.CompileTimeout > 0 {
 		compileTimeout = api.cfg.CompileTimeout
 	}
-	ctx, cancel := context.WithTimeout(ctx, compileTimeout+execTimeout+5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), compileTimeout+execTimeout+5*time.Second)
 	defer cancel()
 	
-	// 运行代码
-	result := api.runner.Run(ctx, language, req.SourceCode, req.Stdin, req.ExpectedOutput)
+	// 运行代码（使用修改后的配置）
+	log.Printf("API: 调用RunWithConfig，用户指定超时: %v, 超时设置为: %.2f秒", 
+		customCfg.UserSpecifiedTimeout, customCfg.DefaultExecuteTimeLimit.Seconds())
+	result := api.runner.RunWithConfig(ctx, language, req.SourceCode, req.Stdin, req.ExpectedOutput, customCfg)
 	
 	// 转换为API响应
 	response := Response{
@@ -101,6 +136,7 @@ func (api *SandboxAPI) Execute(req Request) Response {
 		Stderr:       result.Stderr,
 		Error:        result.Error,
 		TimeUsed:     result.TimeUsedMillis,
+		MemoryUsed:   result.MemoryUsedKB,
 		CompileError: result.CompileOutput,
 	}
 	

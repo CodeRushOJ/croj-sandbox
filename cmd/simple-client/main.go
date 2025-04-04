@@ -21,6 +21,7 @@ var (
 	stdinFile  = flag.String("stdin", "", "输入数据文件路径")
 	outputFile = flag.String("output", "", "预期输出文件路径")
 	timeout    = flag.Int("timeout", 3, "执行超时时间（秒）")
+	memLimit   = flag.Int("mem", 512, "内存限制（MB）")
 	apiURL     = flag.String("api", "", "远程API URL (如果提供，则使用远程执行，否则使用本地执行)")
 	verbose    = flag.Bool("v", false, "详细模式，显示更多调试信息")
 )
@@ -102,6 +103,7 @@ func main() {
 		SourceCode:     string(sourceCode),
 		Stdin:          stdin,
 		Timeout:        timeout,
+		MemoryLimit:    memLimit,
 		ExpectedOutput: expectedOutput,
 	}
 	
@@ -121,6 +123,13 @@ func main() {
 	fmt.Printf("状态: %s\n", response.Status)
 	fmt.Printf("退出码: %d\n", response.ExitCode)
 	fmt.Printf("执行时间: %d ms\n", response.TimeUsed)
+	
+	// 显示内存使用信息
+	if response.MemoryUsed > 0 {
+		fmt.Printf("内存使用: %d KB (限制: %d MB)\n", response.MemoryUsed, *memLimit)
+	} else {
+		fmt.Printf("内存使用: 未测量 (限制: %d MB)\n", *memLimit)
+	}
 	
 	// 检查是否是Wrong Answer
 	if response.Status == string(sandbox.StatusWrongAnswer) {

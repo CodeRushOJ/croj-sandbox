@@ -22,5 +22,5 @@ func main() {
 		sum += num
 	}
 	
-	fmt.Printf(sum)
+	fmt.Println(sum)
 }

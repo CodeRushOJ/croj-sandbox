@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"sync"
 	"time"
+
+	"github.com/CodeRushOJ/croj-sandbox/internal/util"
 )
 
 // Executor handles executing commands with appropriate resource limits.
@@ -61,44 +63,113 @@ func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]
 
 	// Setup stdout/stderr with limits
 	var stdoutBuf, stderrBuf bytes.Buffer
-	// 修复此处：使用 MaxStdoutSize 而不是 DefaultMaxStdoutSize
 	stdoutWriter := NewLimitedWriter(&stdoutBuf, e.cfg.MaxStdoutSize)
-	// 修复此处：使用 MaxStderrSize 而不是 DefaultMaxStderrSize
 	stderrWriter := NewLimitedWriter(&stderrBuf, e.cfg.MaxStderrSize)
 	execCmd.Stdout = stdoutWriter
 	execCmd.Stderr = stderrWriter
 
+	// 直接使用配置中的超时设置，不再处理
+	execTimeout := e.cfg.DefaultExecuteTimeLimit
+	
+	// 确保有合理的默认值
+	if execTimeout <= 0 {
+		execTimeout = 3 * time.Second
+		log.Printf("警告: 超时设置为0或负值，使用默认值 %.2f秒", execTimeout.Seconds())
+	}
+	
+	// 打印真正使用的超时设置
+	log.Printf("Executor: 最终时间限制设置: %.2f秒", execTimeout.Seconds())
+	
 	// Execute the command
 	startTime := time.Now()
-	runErr := execCmd.Run()
-	duration := time.Since(startTime)
+	
+	// 启动命令但不等待它完成
+	if err := execCmd.Start(); err != nil {
+		return NewResult(StatusSandboxError, fmt.Errorf("failed to start command: %w", err))
+	}
 
-	// Build the result
+	// 获取进程ID并开始监控资源使用
+	pid := execCmd.Process.Pid
+	memLimitKB := e.cfg.DefaultExecuteMemoryLimit / 1024 // 从bytes转换为KB
+	
+	// 更直观的日志输出，显示精确的超时值
+	log.Printf("开始监控进程 %d: 内存限制 %d KB (%.2f MB), 时间限制 %.2f 秒", 
+		pid, memLimitKB, float64(memLimitKB)/1024, execTimeout.Seconds())
+	
+	// 创建监控通道
+	monitorDone := make(chan struct{})
+	defer close(monitorDone)
+	
+	// 创建结果通道，用于从监控goroutine接收资源使用情况
+	resultChan := make(chan *util.ProcessStats, 1)
+	
+	// 启动监控goroutine
+	go func() {
+		// 每10ms检查一次资源使用，提高精度
+		procStats := util.MonitorProcess(pid, memLimitKB, execTimeout, 10*time.Millisecond, monitorDone)
+		resultChan <- procStats
+	}()
+	
+	// 等待命令完成或超时
+	runErr := execCmd.Wait()
+	duration := time.Since(startTime)
+	
+	// 收集监控结果
+	var procStats *util.ProcessStats
+	select {
+	case stats := <-resultChan:
+		procStats = stats
+	case <-time.After(100 * time.Millisecond):
+		// 如果监控没有及时返回结果，创建默认结果
+		procStats = &util.ProcessStats{
+			PID:       pid,
+			MemoryKB:  -1,
+			Duration:  duration,
+			IsTimeout: false,
+		}
+	}
+
+	// 构建结果
 	result := Result{
 		ExitCode:       0, // Will be set below if available
 		TimeUsedMillis: duration.Milliseconds(),
-		MemoryUsedKB:   -1, // Not measured in v0.1
+		MemoryUsedKB:   procStats.MemoryKB,
 		Stdout:         stdoutBuf.String(),
 		Stderr:         stderrBuf.String(),
 	}
 
-	// Determine status based on various conditions
-	// 1. Check for context timeout
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	// 确定状态
+	// 1. 首先检查是否超时
+	if procStats.IsTimeout {
 		result.Status = StatusTimeLimitExceeded
-		result.Error = ErrExecuteTimeout.Error()
-		result.ExitCode = -1 // Invalid on timeout
+		result.Error = fmt.Sprintf("时间超限: %.2f秒 (限制: %.2f秒)", 
+			procStats.Duration.Seconds(), execTimeout.Seconds())
+		result.ExitCode = -1
+		return result
+	}
+	
+	// 2. 再检查内存限制
+	if procStats.IsExceeded {
+		result.Status = StatusMemoryLimitExceeded
+		result.Error = fmt.Sprintf("Memory limit exceeded: %d KB (limit: %d KB)", procStats.MemoryKB, memLimitKB)
+		result.ExitCode = -1
 		return result
 	}
 
-	// 2. Check for output limit exceeded
+	// 3. 检查Context是否超时(备用检测)
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		result.Status = StatusTimeLimitExceeded
+		result.Error = fmt.Sprintf("Context deadline exceeded: %v", ErrExecuteTimeout)
+		result.ExitCode = -1
+		return result
+	}
+
+	// 4. Check for output limit exceeded
 	var outputLimitErr error
 	if stdoutWriter.(*LimitedWriter).Exceeded {
-		// 修复此处：使用 MaxStdoutSize 而不是 DefaultMaxStdoutSize
 		outputLimitErr = fmt.Errorf("%w (stdout, limit: %d bytes)", ErrOutputLimitExceeded, e.cfg.MaxStdoutSize)
 	}
 	if stderrWriter.(*LimitedWriter).Exceeded {
-		// 修复此处：使用 MaxStderrSize 而不是 DefaultMaxStderrSize
 		errAppend := fmt.Errorf("%w (stderr, limit: %d bytes)", ErrOutputLimitExceeded, e.cfg.MaxStderrSize)
 		if outputLimitErr != nil {
 			outputLimitErr = fmt.Errorf("%v; %v", outputLimitErr, errAppend)
@@ -112,7 +183,7 @@ func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]
 		result.Error = outputLimitErr.Error()
 	}
 
-	// 3. Check run errors and exit code
+	// 5. Check run errors and exit code
 	if execCmd.ProcessState != nil {
 		result.ExitCode = execCmd.ProcessState.ExitCode()
 	}
@@ -122,7 +193,7 @@ func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]
 		result.Error = fmt.Sprintf("Runtime error: %v (exit code: %d)", runErr, result.ExitCode)
 	}
 
-	// 4. Set as Accepted if no other status was determined
+	// 6. Set as Accepted if no other status was determined
 	if result.Status == "" {
 		if result.ExitCode == 0 {
 			result.Status = StatusAccepted
@@ -157,7 +228,7 @@ func (lw *LimitedWriter) Write(p []byte) (n int, err error) {
 
 	remaining := lw.limit - lw.written
 	if remaining <= 0 {
-		if !lw.Exceeded {
+		if (!lw.Exceeded) {
 			lw.Exceeded = true
 		}
 		return len(p), nil // Pretend we wrote everything
