@@ -11,9 +11,11 @@ import (
 
 // Request represents a code execution request
 type Request struct {
-	SourceCode string  `json:"sourceCode"` // Go source code to execute
-	Stdin      *string `json:"stdin"`      // Optional standard input
-	Timeout    *int    `json:"timeout"`    // Optional custom timeout in seconds
+	SourceCode     string  `json:"sourceCode"`     // Source code to execute
+	Language       string  `json:"language"`       // Programming language (default: "go")
+	Stdin          *string `json:"stdin"`          // Optional standard input
+	Timeout        *int    `json:"timeout"`        // Optional custom timeout in seconds
+	ExpectedOutput *string `json:"expectedOutput"` // Optional expected output for comparison
 }
 
 // Response represents the execution result
@@ -51,28 +53,47 @@ func NewSandboxAPIWithConfig(cfg Config) (*SandboxAPI, error) {
 	}, nil
 }
 
-// Execute runs the provided Go code and returns the result
+// Execute runs the provided code and returns the result
 func (api *SandboxAPI) Execute(req Request) Response {
+	// Set default language if not specified
+	language := req.Language
+	if language == "" {
+		language = "go" // 默认使用Go语言
+	}
+	
 	// Apply custom timeout if provided
 	ctx := context.Background()
-	execTimeout := api.cfg.ExecTimeout
+	var execTimeout time.Duration
 	
+	// 检查语言配置是否存在
+	if langConfig, ok := api.cfg.Languages[language]; ok {
+		execTimeout = langConfig.GetExecuteTimeout(api.cfg.DefaultExecuteTimeLimit)
+	} else {
+		// 回退到兼容字段
+		execTimeout = api.cfg.ExecTimeout
+	}
+	
+	// 应用自定义超时（如果提供）
 	if req.Timeout != nil && *req.Timeout > 0 {
 		customTimeout := time.Duration(*req.Timeout) * time.Second
-		// Don't exceed reasonable limits
+		// 不超过合理限制
 		if customTimeout <= 30*time.Second {
 			execTimeout = customTimeout
 		}
 	}
 	
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(ctx, api.cfg.CompileTimeout+execTimeout+5*time.Second)
+	// Create context with timeout (估计编译时间+执行时间+额外缓冲)
+	compileTimeout := api.cfg.DefaultCompileTimeLimit
+	if api.cfg.CompileTimeout > 0 {
+		compileTimeout = api.cfg.CompileTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, compileTimeout+execTimeout+5*time.Second)
 	defer cancel()
 	
-	// Run the code
-	result := api.runner.Run(ctx, req.SourceCode, req.Stdin)
+	// 运行代码
+	result := api.runner.Run(ctx, language, req.SourceCode, req.Stdin, req.ExpectedOutput)
 	
-	// Convert to API response
+	// 转换为API响应
 	response := Response{
 		Status:       string(result.Status),
 		ExitCode:     result.ExitCode,

@@ -15,6 +15,7 @@ const (
 	StatusOutputLimitExceeded Status = "Output Limit Exceeded" // Stdout or Stderr exceeded the size limit.
 	StatusSandboxError        Status = "Sandbox Error"         // Internal error within the sandbox system (e.g., file ops).
 	StatusUnknown             Status = "Unknown"               // Unknown status.
+	StatusWrongAnswer         Status = "Wrong Answer"          // Output doesn't match expected (used with comparison)
 )
 
 // Result holds the outcome of a code execution in the sandbox.
@@ -52,10 +53,11 @@ func NewResult(status Status, err error) Result {
 
 // Predefined sandbox errors (can be expanded)
 var (
-	ErrCompileTimeout    = errors.New("local compilation timed out")
-	ErrCompileFailed     = errors.New("local compilation failed")
-	ErrExecuteTimeout    = errors.New("local execution timed out")
-	ErrHostTempDir       = errors.New("failed to manage host temporary directory")
-	ErrBinaryNotFound    = errors.New("compiled binary not found")
+	ErrCompileTimeout     = errors.New("local compilation timed out")
+	ErrCompileFailed      = errors.New("local compilation failed")
+	ErrExecuteTimeout     = errors.New("local execution timed out")
+	ErrHostTempDir        = errors.New("failed to manage host temporary directory")
+	ErrBinaryNotFound     = errors.New("compiled binary not found")
 	ErrOutputLimitExceeded = errors.New("output limit exceeded")
+	ErrOutputMismatch     = errors.New("output does not match expected")
 )
