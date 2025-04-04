@@ -97,6 +97,15 @@ type Config struct {
 
 	// 是否使用用户指定的超时（优先级高于语言配置）
 	UserSpecifiedTimeout bool
+
+	// 安全相关设置
+	Language           string // 执行的编程语言
+	StrictSecurity     bool   // 使用严格的安全限制
+	NoSecurity         bool   // 完全禁用安全限制
+	DisableNetworking  bool   // 禁用网络访问
+	DisableFileWrite   bool   // 禁用文件写入（只读模式）
+	AllowedPaths       []string // 允许访问的路径列表
+	SeccompProfile     string // 自定义seccomp配置文件路径
 }
 
 // DefaultConfig returns a new Config struct with default values and language settings.
@@ -114,6 +123,13 @@ func DefaultConfig() Config {
 		CompileTimeout:         time.Duration(DefaultCompileTimeLimitSec) * time.Second,
 		ExecTimeout:            time.Duration(DefaultExecuteTimeLimitSec) * time.Second,
 		SrcFileName:            "main.go",
+
+		// 默认安全设置
+		StrictSecurity:    true,
+		NoSecurity:        false,
+		DisableNetworking: true,
+		DisableFileWrite:  false,
+		AllowedPaths:      []string{"/tmp"},
 	}
 
 	// 添加所有支持的语言配置
