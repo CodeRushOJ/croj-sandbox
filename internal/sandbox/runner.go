@@ -2,92 +2,191 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"time"
 
-	"github.com/CodeRushOJ/croj-sandbox/internal/util" // Import local util package
+	"github.com/CodeRushOJ/croj-sandbox/internal/util" // Import util which now includes compare
 )
 
-// Runner orchestrates the local code compilation and execution simulation.
+// Runner orchestrates the local code compilation and execution simulation using LanguageConfig.
 type Runner struct {
 	cfg      Config
-	compiler *Compiler
 	executor *Executor
 }
 
 // NewRunner creates a new local sandbox runner instance.
 func NewRunner(cfg Config) (*Runner, error) {
-	// Ensure HostTempDir exists (moved here from util for single point of check)
 	if err := util.EnsureDir(cfg.HostTempDir); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrHostTempDir, err)
 	}
-
-	compiler := NewCompiler(cfg)
 	executor := NewExecutor(cfg)
-
-	log.Printf("Local sandbox runner initialized: CompileTimeout=%v, ExecTimeout=%v, MaxStdout=%dKB, MaxStderr=%dKB",
-		cfg.CompileTimeout, cfg.ExecTimeout, cfg.MaxStdoutSize/1024, cfg.MaxStderrSize/1024)
-
+	log.Printf("Local sandbox runner initialized: HostTemp='%s'", cfg.HostTempDir)
 	return &Runner{
 		cfg:      cfg,
-		compiler: compiler,
 		executor: executor,
 	}, nil
 }
 
-// Run compiles the source code locally and then executes the binary locally.
-// stdinData is optional standard input for the user program.
-func (r *Runner) Run(ctx context.Context, sourceCode string, stdinData *string) Result {
-	// 1. Setup temporary directory for this run
+// Run compiles and executes source code for a given language locally using LanguageConfig.
+// expectedOutput: Optional string containing the expected standard output for comparison. If nil, comparison is skipped.
+func (r *Runner) Run(ctx context.Context, language, sourceCode string, stdinData *string, expectedOutput *string) Result { // Added expectedOutput
+	// 1. Get Language Configuration
+	langCfg, ok := r.cfg.Languages[language]
+	if !ok {
+		err := fmt.Errorf("language configuration for '%s' not found", language)
+		log.Printf("%v", err)
+		return NewResult(StatusSandboxError, err)
+	}
+
+	// 2. Setup temporary directory
 	hostRunDir, cleanup, err := util.SetupHostRunDir(r.cfg.HostTempDir)
 	if err != nil {
 		log.Printf("Error setting up host run dir: %v", err)
 		return NewResult(StatusSandboxError, fmt.Errorf("%w: %w", ErrHostTempDir, err))
 	}
-	defer cleanup() // Ensure cleanup happens
+	defer cleanup()
 
-	// --- 2. Compile Code Locally ---
-	binaryPath, compileOutput, compileErr := r.compiler.Compile(ctx, sourceCode, hostRunDir)
+	// 3. Determine and write source file
+	srcFileName := langCfg.Compile.SrcName
+	if srcFileName == "" {
+		return NewResult(StatusSandboxError, fmt.Errorf("language '%s' CompileConfig missing SrcName", language))
+	}
+	sourceFilePath := filepath.Join(hostRunDir, srcFileName)
+	if err := os.WriteFile(sourceFilePath, []byte(sourceCode), 0644); err != nil {
+		log.Printf("Error writing source code to %s: %v", sourceFilePath, err)
+		return NewResult(StatusSandboxError, fmt.Errorf("failed to write source file: %w", err))
+	}
+	log.Printf("[%s] Source code saved to: %s", language, sourceFilePath)
 
-	// Handle compilation result
-	if compileErr != nil {
-		log.Printf("Compilation failed: %v", compileErr)
-		// Check if it was specifically a timeout or general compile error
-		status := StatusCompileError
-		errToReport := compileErr
-		if errors.Is(compileErr, ErrCompileTimeout) {
-            // Keep status as CompileError, but use the specific timeout error
-            errToReport = ErrCompileTimeout
+	// --- 4. Compile Step ---
+	var compileOutput string
+	var compiledExePath string = sourceFilePath
+	var compileErr error
+
+	if langCfg.Compile.CompileCommand != "" {
+		log.Printf("[%s] Starting compilation phase.", language)
+		compileStartTime := time.Now()
+		exeName := langCfg.Compile.ExeName
+		if exeName == "" {
+			return NewResult(StatusSandboxError, fmt.Errorf("language '%s' has CompileCommand but no ExeName", language))
 		}
+		if runtime.GOOS == "windows" && filepath.Ext(exeName) == "" && language != "java" {
+			exeName += ".exe"
+		}
+		compiledExePath = filepath.Join(hostRunDir, exeName)
+		placeholders := map[string]string{
+			PlaceholderSrcPath: sourceFilePath, PlaceholderExePath: compiledExePath,
+			PlaceholderWorkDir: hostRunDir, PlaceholderExeDir: filepath.Dir(compiledExePath),
+		}
+		compileCmdStr := util.ProcessCommandString(langCfg.Compile.CompileCommand, placeholders)
+		if compileCmdStr == "" {
+			return NewResult(StatusSandboxError, fmt.Errorf("processed compile command for '%s' is empty", language))
+		}
+		compileTimeout := langCfg.GetCompileTimeout(r.cfg.DefaultCompileTimeLimit)
+		compileCtx, cancel := context.WithTimeout(ctx, compileTimeout)
+		// #nosec G204
+		cmd := exec.CommandContext(compileCtx, "sh", "-c", compileCmdStr)
+		cmd.Dir = hostRunDir
+		var stderr, stdout bytes.Buffer
+		cmd.Stderr = &stderr
+		cmd.Stdout = &stdout
+		log.Printf("[%s] Executing Compile: sh -c \"%s\"", language, compileCmdStr)
+		runCompileErr := cmd.Run()
+		compileOutput = stdout.String() + stderr.String()
+		compileDuration := time.Since(compileStartTime)
+		cancel() // Cancel context
 
-		res := NewResult(status, errToReport)
+		if runCompileErr != nil {
+			if errors.Is(compileCtx.Err(), context.DeadlineExceeded) {
+				compileErr = fmt.Errorf("%w (limit: %v)", ErrCompileTimeout, compileTimeout)
+				log.Printf("[%s] Compile timeout after %v. Output: %s", language, compileDuration, compileOutput)
+			} else {
+				compileErr = fmt.Errorf("%w: %v", ErrCompileFailed, runCompileErr)
+				log.Printf("[%s] Compile failed after %v: %v. Output: %s", language, compileDuration, runCompileErr, compileOutput)
+			}
+		} else {
+			// Verify executable existence (heuristic)
+			_, statErr := os.Stat(compiledExePath)
+			isCompiledLang := language == "go" || language == "cpp" // Add other compiled languages here
+			if statErr != nil && isCompiledLang {
+				compileErr = fmt.Errorf("%w '%s': %w", ErrBinaryNotFound, compiledExePath, statErr)
+				log.Printf("[%s] %v", language, compileErr)
+			} else {
+				log.Printf("[%s] Compile successful in %v.", language, compileDuration)
+			}
+		}
+	} else {
+		log.Printf("[%s] Skipping compilation phase.", language)
+	}
+
+	// Handle Compile Error Result
+	if compileErr != nil {
+		res := NewResult(StatusCompileError, compileErr)
 		res.CompileOutput = compileOutput
-		// For CE, put compiler stderr into the main Error field for easier display
-		if status == StatusCompileError && !errors.Is(compileErr, ErrCompileTimeout) {
-             res.Error = compileOutput
-        }
+		if !errors.Is(compileErr, ErrCompileTimeout) {
+			res.Error = compileOutput
+		}
 		return res
 	}
-	log.Printf("Compilation successful, binary at %s", binaryPath)
 
-	// --- 3. Execute Binary Locally ---
-	// Pass the main context 'ctx' which might have an overall deadline,
-	// executor uses its own ExecTimeout internally via context derived from this.
-	execResult := r.executor.Execute(ctx, binaryPath, stdinData)
+	// --- 5. Execute Step ---
+	log.Printf("[%s] Starting execution phase.", language)
+	memLimitBytes := langCfg.GetMemoryLimit(r.cfg.DefaultExecuteMemoryLimit)
+	memLimitKB := memLimitBytes / 1024
+	runPlaceholders := map[string]string{
+		PlaceholderExePath: compiledExePath, PlaceholderWorkDir: hostRunDir,
+		PlaceholderSrcPath: sourceFilePath, PlaceholderExeDir: filepath.Dir(compiledExePath),
+		PlaceholderMaxMemory: strconv.FormatInt(memLimitKB, 10),
+	}
+	runCmdParts, templateErr := util.ProcessCommandTemplate(langCfg.Run.Command, runPlaceholders)
+	if templateErr != nil {
+		err := fmt.Errorf("failed to process run command template for '%s': %w", language, templateErr)
+		log.Printf("%v", err)
+		res := NewResult(StatusSandboxError, err)
+		res.CompileOutput = compileOutput
+		return res
+	}
+	// execTimeout := r.cfg.DefaultExecuteTimeLimit
+	execResult := r.executor.Execute(ctx, runCmdParts, langCfg.Run.Env, stdinData)
+	execResult.CompileOutput = compileOutput // Add compile output regardless of exec status
 
-	// Add compile output to the final result (if not already CE)
-	if execResult.Status != StatusCompileError {
-		execResult.CompileOutput = compileOutput
+	// --- 6. Output Comparison Step ---
+	// Only compare if execution was successful so far (status Accepted) and expected output is provided.
+	if execResult.Status == StatusAccepted && expectedOutput != nil {
+		log.Printf("[%s] Comparing output...", language)
+		match := util.CompareOutputs(execResult.Stdout, *expectedOutput)
+		if !match {
+			log.Printf("[%s] Output mismatch!", language)
+			log.Printf("[%s] Expected: %q", language, util.NormalizeString(*expectedOutput))
+			log.Printf("[%s] Actual: %q", language, util.NormalizeString(execResult.Stdout))
+			execResult.Status = StatusWrongAnswer
+			// Add more detail to the error field
+			execResult.Error = ErrOutputMismatch.Error()
+		} else {
+			log.Printf("[%s] Output matches expected.", language)
+			// Status remains Accepted
+		}
+	} else if execResult.Status == StatusAccepted && expectedOutput == nil {
+		log.Printf("[%s] Skipping output comparison (no expected output provided).", language)
+	} else if expectedOutput != nil {
+		log.Printf("[%s] Skipping output comparison (execution status is %s, not Accepted)", language, execResult.Status)
 	}
 
-	log.Printf("Execution finished with status: %s", execResult.Status)
+	log.Printf("[%s] Final result status: %s", language, execResult.Status)
 	return execResult
 }
 
-// Close is a placeholder in v0.1 as there are no persistent resources like Docker client.
+// Close placeholder
 func (r *Runner) Close() error {
-	log.Println("Closing sandbox runner (no-op in local v0.1)")
+	log.Println("Closing sandbox runner (no-op in local version)")
 	return nil
 }
