@@ -1,237 +1,127 @@
+// cmd/simple-client/main.go
 package main
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"flag"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"log"
-	"net/http"
-	"os"
-	"strings"
+	"time"
 
-	"github.com/CodeRushOJ/croj-sandbox/internal/sandbox"
-	"github.com/CodeRushOJ/croj-sandbox/internal/util"
+	pb "github.com/CodeRushOJ/croj-sandbox/proto"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 var (
-	sourceFile = flag.String("source", "", "源代码文件路径")
-	language   = flag.String("lang", "", "编程语言 (go, cpp, python等，如果未指定，将从文件扩展名推断)")
-	stdinFile  = flag.String("stdin", "", "输入数据文件路径")
-	outputFile = flag.String("output", "", "预期输出文件路径")
-	timeout    = flag.Int("timeout", 3, "执行超时时间（秒）")
-	memLimit   = flag.Int("mem", 512, "内存限制（MB）")
-	apiURL     = flag.String("api", "", "远程API URL (如果提供，则使用远程执行，否则使用本地执行)")
+	serverAddr = flag.String("server", "localhost:50051", "gRPC 服务器地址")
+	language   = flag.String("lang", "go", "编程语言")
+	sourceFile = flag.String("src", "", "源代码文件路径")
+	stdinFile  = flag.String("stdin", "", "标准输入文件路径 (可选)")
+	timeout    = flag.Int("t", 3, "执行超时时间（秒）")
+	memory     = flag.Int("m", 512, "内存限制（MB）")
 	verbose    = flag.Bool("v", false, "详细模式，显示更多调试信息")
-	jsonOutput = flag.Bool("json", true, "以JSON格式输出结果")
-	debug      = flag.Bool("debug", false, "启用调试日志")
 )
-
-// 从文件扩展名推断语言
-func inferLanguage(filename string) string {
-	ext := strings.ToLower(strings.TrimPrefix(filename[strings.LastIndex(filename, "."):], "."))
-	switch ext {
-	case "go":
-		return "go"
-	case "c", "cpp", "cc", "cxx":
-		return "cpp"
-	case "py":
-		return "python"
-	case "java":
-		return "java"
-	case "js":
-		return "javascript"
-	default:
-		return ""
-	}
-}
 
 func main() {
 	flag.Parse()
-	
-	// 初始化调试模式
-	if *debug || *verbose {
-		util.DebugMode = true
-		os.Setenv("CROJ_DEBUG", "true")
-	} else {
-		// 也检查环境变量
-		util.InitDebugMode()
-	}
-	
+
 	// 设置日志格式
-	log.SetFlags(log.Ldate | log.Ltime)
-	
-	// 验证参数
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+
 	if *sourceFile == "" {
-		flag.Usage()
-		log.Fatal("必须指定源代码文件路径")
+		log.Fatal("错误：必须提供源代码文件路径 (-src)")
 	}
-	
-	// 读取源代码
-	sourceCode, err := os.ReadFile(*sourceFile)
+
+	// 读取源代码文件
+	sourceCodeBytes, err := ioutil.ReadFile(*sourceFile)
 	if err != nil {
-		log.Fatalf("无法读取源代码文件: %v", err)
+		log.Fatalf("读取源代码文件 '%s' 失败: %v", *sourceFile, err)
 	}
-	
-	// 确定编程语言
-	lang := *language
-	if lang == "" {
-		lang = inferLanguage(*sourceFile)
-		if lang == "" {
-			log.Fatal("无法从文件扩展名推断语言，请使用 -lang 参数指定")
-		}
-		fmt.Printf("从文件扩展名推断语言: %s\n", lang)
-	}
-	
-	// 读取标准输入（如果提供）
-	var stdin *string
+	sourceCode := string(sourceCodeBytes)
+
+	// 读取标准输入文件（如果提供）
+	var stdinContent string
 	if *stdinFile != "" {
-		fmt.Printf("使用输入文件: %s\n", *stdinFile)
-		stdinData, err := os.ReadFile(*stdinFile)
+		stdinBytes, err := ioutil.ReadFile(*stdinFile)
 		if err != nil {
-			log.Fatalf("无法读取标准输入文件: %v", err)
+			log.Fatalf("读取标准输入文件 '%s' 失败: %v", *stdinFile, err)
 		}
-		stdinStr := string(stdinData)
-		stdin = &stdinStr
+		stdinContent = string(stdinBytes)
 	}
-	
-	// 读取期望输出（如果提供）
-	var expectedOutput *string
-	if *outputFile != "" {
-		fmt.Printf("使用预期输出文件: %s (将比较执行结果)\n", *outputFile)
-		outputData, err := os.ReadFile(*outputFile)
-		if err != nil {
-			log.Fatalf("无法读取预期输出文件: %v", err)
-		}
-		outputStr := string(outputData)
-		expectedOutput = &outputStr
+
+	// 设置 gRPC 连接选项
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()), // 使用不安全的连接（仅用于测试）
+		grpc.WithBlock(), // 阻塞直到连接建立
 	}
-	
-	// 创建执行请求
-	request := sandbox.Request{
-		Language:       lang,
-		SourceCode:     string(sourceCode),
-		Stdin:          stdin,
-		Timeout:        timeout,
-		MemoryLimit:    memLimit,
-		ExpectedOutput: expectedOutput,
+
+	// 连接到 gRPC 服务器
+	log.Printf("连接到 gRPC 服务器 %s...", *serverAddr)
+	conn, err := grpc.Dial(*serverAddr, opts...)
+	if err != nil {
+		log.Fatalf("连接服务器失败: %v", err)
 	}
-	
-	var response sandbox.Response
-	
-	// 检查是使用本地执行还是远程API执行
-	if *apiURL != "" {
-		// 远程API执行
-		response = executeRemote(request, *apiURL)
-	} else {
-		// 本地执行
-		response = executeLocal(request)
+	defer conn.Close()
+
+	log.Println("已连接到服务器")
+
+	// 创建 gRPC 客户端
+	client := pb.NewSandboxServiceClient(conn)
+
+	// 准备 gRPC 请求
+	req := &pb.ExecuteRequest{
+		Language:    *language,
+		SourceCode:  sourceCode,
+		Stdin:       stdinContent,
+		Timeout:     int32(*timeout),
+		MemoryLimit: int32(*memory),
 	}
-	
-	// 如果指定了JSON输出模式，则直接输出JSON
-	if *jsonOutput {
-		prettyJSON, err := json.MarshalIndent(response, "", "  ")
-		if err != nil {
-			log.Fatalf("序列化结果失败: %v", err)
-		}
-		fmt.Println(string(prettyJSON))
-		return
+
+	// 设置请求上下文和超时
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeout+5)*time.Second) // 客户端超时比服务器稍长
+	defer cancel()
+
+	// 调用 gRPC 服务
+	log.Printf("发送执行请求: Language=%s, Timeout=%ds, Memory=%dMB", req.Language, req.Timeout, req.MemoryLimit)
+	startTime := time.Now()
+	resp, err := client.Execute(ctx, req)
+	elapsedTime := time.Since(startTime)
+
+	if err != nil {
+		log.Fatalf("调用 Execute 方法失败: %v", err)
 	}
-	
+
 	// 打印结果
-	fmt.Printf("\n=== 执行结果 ===\n")
-	fmt.Printf("状态: %s\n", response.Status)
-	fmt.Printf("退出码: %d\n", response.ExitCode)
-	fmt.Printf("执行时间: %d ms\n", response.TimeUsed)
-	
-	// 显示内存使用信息
-	if response.MemoryUsed > 0 {
-		fmt.Printf("内存使用: %d KB (限制: %d MB)\n", response.MemoryUsed, *memLimit)
-	} else {
-		fmt.Printf("内存使用: 未测量 (限制: %d MB)\n", *memLimit)
+	fmt.Println("--- 执行结果 ---")
+	fmt.Printf("状态: %s\n", resp.Status)
+	fmt.Printf("退出码: %d\n", resp.ExitCode)
+	fmt.Printf("执行时间: %d ms\n", resp.TimeUsed)
+	fmt.Printf("内存使用: %d KB\n", resp.MemoryUsed)
+	fmt.Printf("客户端请求耗时: %s\n", elapsedTime)
+
+	if resp.Stdout != "" {
+		fmt.Println("--- 标准输出 ---")
+		fmt.Println(resp.Stdout)
 	}
-	
-	// 检查是否是Wrong Answer
-	if response.Status == string(sandbox.StatusWrongAnswer) {
-		fmt.Printf("\n=== 输出比较 ===\n")
-		fmt.Printf("预期输出:\n%s\n", *expectedOutput)
-		fmt.Printf("实际输出:\n%s\n", response.Stdout)
-		fmt.Printf("\n输出不匹配! 请检查以上内容的差异。\n")
-		
-		// 如果在详细模式下，显示规范化后的字符串比较
-		if *verbose {
-			normalizedExpected := util.NormalizeString(*expectedOutput)
-			normalizedActual := util.NormalizeString(response.Stdout)
-			fmt.Printf("\n规范化后的预期输出:\n%s\n", normalizedExpected)
-			fmt.Printf("规范化后的实际输出:\n%s\n", normalizedActual)
-		}
+	if resp.Stderr != "" {
+		fmt.Println("--- 标准错误 ---")
+		fmt.Println(resp.Stderr)
 	}
-	
-	if response.CompileError != "" {
-		fmt.Printf("\n=== 编译错误 ===\n%s\n", response.CompileError)
+	if resp.CompileError != "" {
+		fmt.Println("--- 编译错误 ---")
+		fmt.Println(resp.CompileError)
 	}
-	
-	if response.Stdout != "" && response.Status != string(sandbox.StatusWrongAnswer) {
-		fmt.Printf("\n=== 标准输出 ===\n%s\n", response.Stdout)
+	if resp.Error != "" {
+		fmt.Println("--- 内部错误 ---")
+		fmt.Println(resp.Error)
 	}
-	
-	if response.Stderr != "" {
-		fmt.Printf("\n=== 标准错误 ===\n%s\n", response.Stderr)
-	}
-	
-	if response.Error != "" && response.Error != response.CompileError {
-		fmt.Printf("\n=== 错误信息 ===\n%s\n", response.Error)
-	}
-	
-	// 在详细模式下，打印JSON格式的完整结果
+
 	if *verbose {
-		prettyJSON, _ := json.MarshalIndent(response, "", "  ")
-		fmt.Printf("\n=== 完整结果JSON ===\n%s\n", string(prettyJSON))
+		log.Println("--- 详细响应信息 ---")
+		log.Printf("%+v\n", resp)
 	}
-}
 
-// 使用本地沙箱执行代码
-func executeLocal(req sandbox.Request) sandbox.Response {
-	// 创建API实例
-	api, err := sandbox.NewSandboxAPI()
-	if err != nil {
-		log.Fatalf("初始化本地沙箱失败: %v", err)
-	}
-	defer api.Close()
-	
-	fmt.Printf("使用本地沙箱执行 %s 代码...\n", req.Language)
-	return api.Execute(req)
-}
-
-// 向远程API发送请求执行代码
-func executeRemote(req sandbox.Request, apiURL string) sandbox.Response {
-	reqJSON, err := json.Marshal(req)
-	if err != nil {
-		log.Fatalf("序列化请求失败: %v", err)
-	}
-	
-	fmt.Printf("向远程API发送 %s 代码执行请求: %s\n", req.Language, apiURL)
-	resp, err := http.Post(apiURL, "application/json", bytes.NewBuffer(reqJSON))
-	if err != nil {
-		log.Fatalf("请求API失败: %v", err)
-	}
-	defer resp.Body.Close()
-	
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		log.Fatalf("API返回错误状态码 %d: %s", resp.StatusCode, string(body))
-	}
-	
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Fatalf("读取API响应失败: %v", err)
-	}
-	
-	var response sandbox.Response
-	if err := json.Unmarshal(body, &response); err != nil {
-		log.Fatalf("解析API响应失败: %v", err)
-	}
-	
-	return response
+	log.Println("客户端执行完毕")
 }
