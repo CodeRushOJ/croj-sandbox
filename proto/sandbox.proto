@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package sandbox;
+
+option go_package = "github.com/CodeRushOJ/croj-sandbox/proto";
+
+// SandboxService 定义了沙箱执行服务
+service SandboxService {
+  // Execute 方法用于执行代码
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse) {}
+}
+
+// ExecuteRequest 包含执行代码所需的信息
+message ExecuteRequest {
+  string language = 1;
+  string source_code = 2;
+  string stdin = 3;
+  int32 timeout = 4;         // 超时时间（秒）
+  int32 memory_limit = 5;    // 内存限制（MB）
+  string expected_output = 6; // 预期输出，用于比较
+}
+
+// ExecuteResponse 包含代码执行的结果
+message ExecuteResponse {
+  string status = 1;         // 执行状态 (e.g., Accepted, WrongAnswer, TimeLimitExceeded)
+  int32 exit_code = 2;       // 进程退出码
+  string stdout = 3;         // 标准输出
+  string stderr = 4;         // 标准错误
+  string error = 5;          // 内部错误信息
+  string compile_error = 6;  // 编译错误信息
+  int64 time_used = 7;       // 执行时间（毫秒）
+  int64 memory_used = 8;     // 内存使用（KB）
+}

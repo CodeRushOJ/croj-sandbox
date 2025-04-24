@@ -3,7 +3,6 @@ package security
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	
 	"github.com/CodeRushOJ/croj-sandbox/internal/util"
 )

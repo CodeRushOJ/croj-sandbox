@@ -2,7 +2,6 @@ package security
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/seccomp/libseccomp-golang"
 	"github.com/CodeRushOJ/croj-sandbox/internal/util"
