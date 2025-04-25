@@ -27,7 +27,7 @@ func main() {
 }
 EOF
 
-./simple-client -source /tmp/test_syscall.go -timeout 5 -v
+./simple-client -lang go -src /tmp/test_syscall.go -t 5 -v
 
 # 测试网络访问限制
 echo -e "\n测试网络访问限制："
@@ -43,10 +43,10 @@ except Exception as e:
     print(f"预期的错误发生: {e}")
 EOF
 
-./simple-client -source /tmp/test_network.py -lang python -timeout 5 -v
+./simple-client -lang python -src /tmp/test_network.py -t 5 -v
 
 # 测试内存限制
 echo -e "\n测试内存限制："
-./simple-client -source examples/memory_test/main.cpp -mem 50 -v
+./simple-client -lang cpp -src examples/memory_test/main.cpp -m 50 -v
 
 echo "安全测试完成！"

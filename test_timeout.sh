@@ -15,7 +15,7 @@ echo "==============================="
 # 使用不同的超时值测试
 for timeout in 1 2 3 5; do
   echo -e "${BLUE}测试 $timeout 秒超时:${NC}"
-  ./simple-client -source examples/time_test/main.cpp -timeout $timeout -v
+  ./simple-client -lang cpp -src examples/time_test/main.cpp -t $timeout -v
   
   echo "------------------------------"
   sleep 1
