@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"strings"
 	"time"
+	"encoding/json"
 
 	pb "github.com/CodeRushOJ/croj-sandbox/proto"
+	"github.com/CodeRushOJ/croj-sandbox/internal/util"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -22,6 +25,8 @@ var (
 	timeout    = flag.Int("t", 3, "执行超时时间（秒）")
 	memory     = flag.Int("m", 512, "内存限制（MB）")
 	verbose    = flag.Bool("v", false, "详细模式，显示更多调试信息")
+	zkAddr = flag.String("zk", "localhost:2181", "zookeeper 地址，多个用逗号分隔")
+	zkRoot = flag.String("zk-root", "/croj/sandbox", "zookeeper 根路径")
 )
 
 func main() {
@@ -51,20 +56,43 @@ func main() {
 		stdinContent = string(stdinBytes)
 	}
 
+	// 通过 zookeeper 发现可用节点
+	zkAddrs := strings.Split(*zkAddr, ",")
+	zkClient, err := util.NewZkClient(zkAddrs)
+	if err != nil {
+		log.Fatalf("Zookeeper 连接失败: %v", err)
+	}
+	defer zkClient.Close()
+
+	// 发现负载最低的节点
+	bestNodeData, err := zkClient.Discover(*zkRoot)
+	if err != nil {
+		log.Fatalf("服务发现失败: %v", err)
+	}
+	var nodeInfo struct {
+		Ip   string  `json:"ip"`
+		Port int     `json:"port"`
+		Cpu  float64 `json:"cpu"`
+	}
+	err = json.Unmarshal([]byte(bestNodeData), &nodeInfo)
+	if err != nil {
+		log.Fatalf("解析节点信息失败: %v", err)
+	}
+	server := fmt.Sprintf("%s:%d", nodeInfo.Ip, nodeInfo.Port)
+	log.Printf("选择节点: %s (CPU: %.2f%%)", server, nodeInfo.Cpu)
+
 	// 设置 gRPC 连接选项
 	opts := []grpc.DialOption{
-		grpc.WithTransportCredentials(insecure.NewCredentials()), // 使用不安全的连接（仅用于测试）
-		grpc.WithBlock(), // 阻塞直到连接建立
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
 	}
-
 	// 连接到 gRPC 服务器
-	log.Printf("连接到 gRPC 服务器 %s...", *serverAddr)
-	conn, err := grpc.Dial(*serverAddr, opts...)
+	log.Printf("连接到 gRPC 服务器 %s...", server)
+	conn, err := grpc.Dial(server, opts...)
 	if err != nil {
 		log.Fatalf("连接服务器失败: %v", err)
 	}
 	defer conn.Close()
-
 	log.Println("已连接到服务器")
 
 	// 创建 gRPC 客户端
