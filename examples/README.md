@@ -12,19 +12,19 @@ cd /Users/zfhe/mywork/croj/croj-sandbox
 go build -o simple-client cmd/simple-client/main.go
 
 # 运行 Go 示例并比较输出
-./simple-client -source examples/go/main.go -stdin examples/go/sum_input.txt -output examples/go/sum_output.txt
+./simple-client -lang go -src examples/go/main.go -stdin examples/go/sum_input.txt
 
 # 运行 C++ 示例并比较输出
-./simple-client -source examples/cpp/main.cpp -stdin examples/cpp/sort_input.txt -output examples/cpp/sort_output.txt
+./simple-client -lang cpp -src examples/cpp/main.cpp -stdin examples/cpp/sort_input.txt
 
 # 运行 Python 示例并比较输出
-./simple-client -source examples/python/main.py -stdin examples/python/calculator_input.txt -output examples/python/calculator_output.txt
+./simple-client -lang python -src examples/python/main.py -stdin examples/python/calculator_input.txt
 
 # 运行 Java 示例并比较输出
-./simple-client -source examples/java/Main.java -stdin examples/java/wordcount_input.txt -output examples/java/wordcount_output.txt
+./simple-client -lang java -src examples/java/Main.java -stdin examples/java/wordcount_input.txt
 
 # 运行 JavaScript 示例并比较输出
-./simple-client -source examples/javascript/main.js -stdin examples/javascript/fibonacci_input.txt -output examples/javascript/fibonacci_output.txt
+./simple-client -lang javascript -src examples/javascript/main.js -stdin examples/javascript/fibonacci_input.txt
 ```
 
 ## 示例说明
@@ -40,7 +40,7 @@ go build -o simple-client cmd/simple-client/main.go
 如果输出比较失败，使用详细模式查看更多细节：
 
 ```bash
-./simple-client -v -source examples/go/sum.go -stdin examples/go/sum_input.txt -output examples/go/sum_output.txt
+./simple-client -v -lang go -src examples/go/main.go -stdin examples/go/sum_input.txt
 ```
 
 这将显示规范化后的字符串以便更容易发现空白符、换行符等差异。
