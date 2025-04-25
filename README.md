@@ -2,15 +2,24 @@
 
 croj-sandbox 是一个轻量级代码执行沙箱，用于安全地编译和运行多种编程语言的代码。它提供本地执行环境和API接口，可集成到各类在线评测系统中。
 
+## 架构
+
+croj-sandbox 包含一个核心的 gRPC API 服务器 (`api-server`)。该服务器负责接收代码执行请求，管理编译和执行过程，并返回结果。
+
+为了实现服务发现和负载均衡，`api-server` 可以注册到 Zookeeper 集群中。客户端或其他服务可以通过 Zookeeper 发现可用的沙箱实例。
+
+代码的实际执行发生在隔离的环境中，目前通过 Docker 容器实现，以提供更好的安全性和资源控制。
+
 ## 功能特点
 
-- 多语言支持：支持Go、C++、Python、Java、JavaScript等编程语言
-- 代码编译：在安全的临时环境中编译源代码
-- 代码执行：运行编译后的程序并收集结果
-- 输出比较：支持与预期输出进行比较（用于评测答案正确性）
-- 限制控制：支持编译超时、执行超时、输出大小限制等
-- 结果收集：包括标准输出、标准错误、退出码、执行时间等
-- API接口：提供HTTP API接口，方便集成到其他系统
+- **多语言支持**：支持 Go、C++、Python、Java、JavaScript (Node.js) 等。
+- **代码编译**：在安全环境中编译源代码。
+- **代码执行**：在隔离的 Docker 容器中运行编译后的程序或解释型语言脚本。
+- **资源限制**：通过 Docker 控制执行过程的 CPU、内存使用。
+- **安全隔离**：利用 Docker 容器、Seccomp、Cgroups 等技术提供安全沙箱环境。
+- **结果收集**：包括标准输出、标准错误、退出码、执行时间、内存使用等。
+- **gRPC API**：提供 gRPC 接口 (`proto/sandbox.proto`)，方便集成。
+- **服务发现**：支持通过 Zookeeper 进行服务注册与发现。
 
 ## 支持的编程语言
 
@@ -67,20 +76,46 @@ go build -o simple-client cmd/simple-client/main.go
 ./simple-client -source main.go -api http://localhost:8080/execute
 ```
 
-### 启动API服务器
+### 启动 gRPC API 服务器
 
 ```bash
-# 编译API服务器
-go build -o api-server cmd/api-server/main.go
+# 编译 API 服务器
+# (或者直接使用 Docker 镜像)
+go build -o api-server ./cmd/api-server
 
-# 启动API服务器
+# 启动 API 服务器 (默认监听 0.0.0.0:50051)
 ./api-server
 
-# 自定义端口
-./api-server -port 9000
+# 指定 Zookeeper 地址进行服务注册
+./api-server --zk=zookeeper1:2181,zookeeper2:2181
 
-# 自定义临时目录
-./api-server -temp-dir /tmp/sandbox-temp
+# 自定义监听地址
+./api-server --addr :60000
+
+# 自定义临时目录 (如果需要本地临时文件)
+# ./api-server -temp-dir /tmp/sandbox-temp 
+```
+
+### 使用 Docker 运行
+
+项目提供了 `Dockerfile` 用于构建和运行沙箱服务。
+
+```bash
+# 1. 构建 Docker 镜像
+docker build -t croj-sandbox:latest .
+
+# 2. 运行沙箱容器
+#    -p 映射 gRPC 端口
+#    --name 给容器命名
+docker run -d --rm -p 50051:50051 --name sandbox-server croj-sandbox:latest
+
+# 3. (可选) 连接到 Zookeeper 网络并注册
+#    假设 Zookeeper 运行在名为 'zk_net' 的 Docker 网络中，服务名为 'zookeeper'
+#    首先确保容器连接到该网络
+docker network connect zk_net sandbox-server
+
+#    然后启动容器时指定 Zookeeper 地址
+docker run -d --rm -p 50051:50051 --network zk_net --name sandbox-server croj-sandbox:latest --zk=zookeeper:2181
 ```
 
 ### 作为库使用
@@ -125,8 +160,18 @@ func main() {
 - MaxStderrSize: 标准错误最大字节数（默认64KB）
 - HostTempDir: 临时文件目录（默认/tmp/croj-sandbox-local-runs）
 
+## 依赖
+
+- Go 1.21+
+- Docker (用于构建和运行)
+- Zookeeper (可选，用于服务发现)
+- `libseccomp-dev` (构建时需要)
+- `libseccomp2` (运行时需要)
+
+Go 模块依赖请参见 `go.mod` 文件。
+
 ## 未来计划
 
-- 支持内存限制检测
-- Docker容器隔离支持
-- 更多编程语言支持
+- 完善资源限制的精细化控制和报告
+- 支持更多编程语言和运行时环境
+- 优化性能和安全性
