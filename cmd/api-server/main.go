@@ -16,41 +16,57 @@ import (
 	"github.com/CodeRushOJ/croj-sandbox/internal/sandbox"
 	pb "github.com/CodeRushOJ/croj-sandbox/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/status"
 )
 
 var (
-	port      = flag.Int("port", 50051, "gRPC 服务端口") // 默认 gRPC 端口
-	tempDir   = flag.String("temp-dir", "", "临时目录路径，为空则使用默认路径")
-	execTime  = flag.Int("exec-timeout", 3, "执行超时时间（秒）")
-	languages = flag.String("languages", "go,cpp,python,java,javascript", "支持的语言列表（逗号分隔）")
+	port           = flag.Int("port", 50051, "gRPC 服务端口") // 默认 gRPC 端口
+	tempDir        = flag.String("temp-dir", "", "临时目录路径，为空则使用默认路径")
+	execTime       = flag.Int("exec-timeout", 3, "执行超时时间（秒）")
+	languages      = flag.String("languages", "go,cpp,python,java,javascript", "支持的语言列表（逗号分隔）")
+	maxConcurrency = flag.Int("max-concurrency", defaultMaxConcurrency(), "每个 Pod 允许的最大并发执行数，必须大于 0")
 )
+
+type sandboxExecutor interface {
+	Execute(sandbox.Request) sandbox.Response
+}
 
 // server 结构体实现了 SandboxServiceServer 接口
 type server struct {
 	pb.UnimplementedSandboxServiceServer
-	api            *sandbox.SandboxAPI
+	api            sandboxExecutor
 	supportedLangs []string
+	limiter        *executionLimiter
 }
 
-func newGRPCServer(api *sandbox.SandboxAPI, supportedLangs []string) (*grpc.Server, *health.Server) {
-	grpcServer := grpc.NewServer()
+func newGRPCServer(api sandboxExecutor, supportedLangs []string, concurrency int) (*grpc.Server, *health.Server, error) {
+	limiter, err := newExecutionLimiter(concurrency)
+	if err != nil {
+		return nil, nil, err
+	}
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(recoveryUnaryServerInterceptor))
 	pb.RegisterSandboxServiceServer(grpcServer, &server{
 		api:            api,
 		supportedLangs: supportedLangs,
+		limiter:        limiter,
 	})
 	healthServer := health.NewServer()
 	healthpb.RegisterHealthServer(grpcServer, healthServer)
 	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 	reflection.Register(grpcServer)
-	return grpcServer, healthServer
+	return grpcServer, healthServer, nil
 }
 
 // Execute 方法实现了 gRPC 服务接口
 func (s *server) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb.ExecuteResponse, error) {
 	log.Printf("收到 gRPC 请求: Language=%s", req.Language)
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 
 	// 验证语言是否支持
 	langSupported := false
@@ -72,6 +88,38 @@ func (s *server) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb.Execu
 			Error:  fmt.Sprintf("不支持的编程语言: %s", requestLang),
 		}, nil // 返回错误信息，但不返回 gRPC 错误
 	}
+
+	release, admitted := s.limiter.tryAcquire()
+	if !admitted {
+		stats := s.limiter.snapshot()
+		log.Printf(
+			"sandbox admission rejected language=%s max_concurrency=%d in_flight=%d rejected_total=%d",
+			requestLang,
+			stats.capacity,
+			stats.inFlight,
+			stats.rejected,
+		)
+		return nil, status.Error(codes.ResourceExhausted, "sandbox execution capacity exhausted")
+	}
+	stats := s.limiter.snapshot()
+	log.Printf(
+		"sandbox admission accepted language=%s max_concurrency=%d in_flight=%d rejected_total=%d",
+		requestLang,
+		stats.capacity,
+		stats.inFlight,
+		stats.rejected,
+	)
+	defer func() {
+		release()
+		finishedStats := s.limiter.snapshot()
+		log.Printf(
+			"sandbox execution slot released language=%s max_concurrency=%d in_flight=%d rejected_total=%d",
+			requestLang,
+			finishedStats.capacity,
+			finishedStats.inFlight,
+			finishedStats.rejected,
+		)
+	}()
 
 	// 构造 sandbox 请求
 	sandboxReq := sandbox.Request{
@@ -120,6 +168,9 @@ func (s *server) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb.Execu
 
 func main() {
 	flag.Parse()
+	if *maxConcurrency <= 0 {
+		log.Fatalf("无效的 max-concurrency: %d（必须大于 0）", *maxConcurrency)
+	}
 
 	// 设置日志格式
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
@@ -153,14 +204,17 @@ func main() {
 		log.Fatalf("监听端口 %d 失败: %v", *port, err)
 	}
 
-	grpcServer, healthServer := newGRPCServer(api, supportedLangs)
+	grpcServer, healthServer, err := newGRPCServer(api, supportedLangs, *maxConcurrency)
+	if err != nil {
+		log.Fatalf("初始化执行并发限制失败: %v", err)
+	}
 	if err := markServingAfterCheck(healthServer, func() error {
 		return checkStartupDependencies(cfg, supportedLangs)
 	}); err != nil {
 		log.Fatalf("沙箱启动自检失败: %v", err)
 	}
 
-	log.Printf("gRPC 服务器正在监听端口 %d", *port)
+	log.Printf("gRPC 服务器正在监听 port=%d max_concurrency=%d", *port, *maxConcurrency)
 
 	// 优雅关闭
 	go func() {

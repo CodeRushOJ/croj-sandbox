@@ -11,6 +11,7 @@ CodeRushOJ 的代码编译与执行节点。服务通过 gRPC 接收评测请求
 - 编译超时、执行超时、内存监控与 64 KiB 标准输出/错误限制
 - `Accepted`、`Wrong Answer`、`Compile Error`、`Runtime Error`、`Time Limit Exceeded`、`Memory Limit Exceeded`、`Output Limit Exceeded`、`Sandbox Error` 等结果
 - 标准 gRPC Health Checking Protocol 和 gRPC reflection
+- Pod 内有界执行并发与 `ResourceExhausted` 过载背压
 - Kubernetes `Service`/`EndpointSlice` 原生发现，不依赖 ZooKeeper
 - Linux cgroup v1/v2 与 seccomp 基础防护
 
@@ -65,8 +66,25 @@ API Server 使用命令行参数：
 | `-temp-dir` | `/tmp/croj-sandbox-local-runs` | 每次执行的临时目录根路径 |
 | `-exec-timeout` | `3` | 默认执行超时，单位秒 |
 | `-languages` | `go,cpp,python,java,javascript` | 允许的语言列表 |
+| `-max-concurrency` | 当前进程 `GOMAXPROCS`，至少为 `1` | 每个 Pod 同时进行的编译/执行数，显式值必须大于 `0` |
 
 默认编译超时为 10 秒，默认内存限制为 512 MiB，stdout 与 stderr 各限制 64 KiB。请求可以缩短或调整执行限制；内存请求上限由服务端限制为 4 GiB。
+
+### 并发与背压
+
+每个 API Server 使用非阻塞 admission semaphore。请求通过语言和 context 校验后尝试占用执行 slot：
+
+- 未达到 `max-concurrency` 时立即进入 `SandboxAPI.Execute`；
+- slot 已满时立即返回 gRPC `codes.ResourceExhausted`，不会调用编译或执行链路；
+- slot 绑定真实执行生命周期，通过 `defer` 在正常返回和 panic 展开时释放；
+- unary recovery interceptor 把 handler panic 转换为 `codes.Internal`，避免单个请求终止服务进程；
+- 已取消的 context 在进入执行器前返回 `codes.Canceled`。
+
+服务记录结构化键值 `max_concurrency`、`in_flight` 和进程生命周期内累计的 `rejected_total`，不记录源码、stdin 或预期输出。judging-server 应把 `ResourceExhausted` 作为容量信号，选择其他 Ready Endpoint 或做有上限的抖动退避；不得无限即时重试同一 Pod。
+
+默认值取 Go 运行时当前可用并行 CPU。Kubernetes 部署应结合容器 CPU limit 显式设置，例如 2 CPU limit 使用 `-max-concurrency=2`；编译器内存峰值较大时应进一步降低，而不是只扩大队列。
+
+收到终止信号后，服务先把 health 改为 `NOT_SERVING`，`grpc.GracefulStop` 停止接受新 RPC 并等待已 admission 的执行完成；对应特征测试会验证这两个条件。当前 drain 尚无独立 deadline，过长执行可能超过 Kubernetes termination grace 后被 SIGKILL；有界 drain、执行 context 传播和强制清理由 [Issue #7](https://github.com/CodeRushOJ/croj-sandbox/issues/7) 跟踪。
 
 ## 本地构建与测试
 
@@ -80,7 +98,7 @@ API Server 使用命令行参数：
 docker build --target builder -t coderushoj/croj-sandbox:builder .
 
 # 在构建环境中运行单元测试、竞态检查和静态检查
-docker run --rm coderushoj/croj-sandbox:builder go test -race ./...
+docker run --rm coderushoj/croj-sandbox:builder go test -race -timeout=10m ./...
 docker run --rm coderushoj/croj-sandbox:builder go vet ./...
 
 # 构建包含五种语言运行时的最终镜像
@@ -90,7 +108,7 @@ docker build -t coderushoj/croj-sandbox:dev .
 如本机已安装完整依赖，可直接运行：
 
 ```bash
-go test -race ./...
+go test -race -timeout=10m ./...
 go vet ./...
 go build ./cmd/api-server
 ```
@@ -146,6 +164,8 @@ spec:
 ```
 
 `deploy/deployment.yaml` 使用 `coderushoj/croj-sandbox:dev`，只面向本机 Kind；正式镜像版本和生产级工作负载仍需在 `croj-platform` Helm chart 中完成安全加固后发布。`croj-judging-server` 只需要 EndpointSlice 的 `list` 权限，不需要访问 Pod 或 Kubernetes Endpoints API。
+
+平台 Helm follow-up：在 `sandbox.args` 的 nsenter 分隔符和 `/app/api-server` 之后追加 `-max-concurrency=N`，并让 `N` 与 sandbox Pod 的 CPU/内存 limit、语言工具链峰值和期望并行度一致。参数缺失时使用运行时 CPU 默认值；`0` 或负数会使 API Server 启动失败，避免无界或含糊配置。
 
 ## 安全边界
 

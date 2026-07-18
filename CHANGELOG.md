@@ -6,6 +6,9 @@
 
 ### Added
 
+- 增加按 Pod 限制的 `max-concurrency` admission semaphore；默认取可用并行 CPU，显式值必须大于 0
+- 满载请求返回 gRPC `ResourceExhausted` 且不进入执行器，并记录 `max_concurrency`、`in_flight`、`rejected_total`
+- 增加 handler panic recovery，以及并发上限、拒绝、slot 释放、取消和竞态测试
 - Kubernetes 原生 `Service`/EndpointSlice 发现契约和 `grpc:50051` 命名端口
 - 标准 gRPC health/reflection，以及工具链、临时目录和真实 cgroup 迁移启动自检
 - 双副本 Kind 开发清单、原生 gRPC probes、CI、竞态测试和 cgroup 集成测试
@@ -13,6 +16,7 @@
 
 ### Changed
 
+- Kind 开发 Deployment 按 2 CPU limit 显式设置 `-max-concurrency=2`
 - 删除 ZooKeeper 注册与客户端发现，调度统一交给 Kubernetes EndpointSlice
 - cgroup v2 在父级正确委派 memory/cpu/pids controller，并按 Pod UID 隔离 cgroup 名称
 - Go 构建与运行工具链升级至 1.24.6，Java 镜像从 JRE 改为 JDK 17

@@ -45,6 +45,7 @@ spec:
             - --cgroup=/proc/1/ns/cgroup
             - --
             - /app/api-server
+            - -max-concurrency=2
           env:
             - name: CROJ_SANDBOX_INSTANCE_ID
               valueFrom:
