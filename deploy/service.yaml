@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: croj-sandbox
+  namespace: coderushoj
+  labels:
+    app.kubernetes.io/name: croj-sandbox
+    app.kubernetes.io/component: sandbox
+spec:
+  selector:
+    app.kubernetes.io/name: croj-sandbox
+  ports:
+    - name: grpc
+      protocol: TCP
+      port: 50051
+      targetPort: grpc

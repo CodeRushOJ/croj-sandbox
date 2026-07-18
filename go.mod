@@ -4,7 +4,6 @@ go 1.24.0
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/samuel/go-zookeeper v0.0.0-20201211165307-7117e9ea2414
 	github.com/seccomp/libseccomp-golang v0.10.0
 	google.golang.org/grpc v1.72.0
 	google.golang.org/protobuf v1.36.6

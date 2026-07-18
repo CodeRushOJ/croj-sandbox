@@ -1,0 +1,9 @@
+.git
+.github
+.idea
+.vscode
+*.md
+*.out
+*.test
+api-server
+simple-client
