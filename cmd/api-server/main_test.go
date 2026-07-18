@@ -14,14 +14,20 @@ import (
 )
 
 func TestNewGRPCServerStartsNotServing(t *testing.T) {
-	server, _ := newGRPCServer(nil, []string{"go"})
+	server, _, err := newGRPCServer(nil, []string{"go"}, 1)
+	if err != nil {
+		t.Fatalf("newGRPCServer: %v", err)
+	}
 	client := newHealthTestClient(t, server)
 
 	assertHealthStatus(t, client, healthpb.HealthCheckResponse_NOT_SERVING)
 }
 
 func TestMarkServingAfterCheckPublishesServing(t *testing.T) {
-	server, healthServer := newGRPCServer(nil, []string{"go"})
+	server, healthServer, err := newGRPCServer(nil, []string{"go"}, 1)
+	if err != nil {
+		t.Fatalf("newGRPCServer: %v", err)
+	}
 	client := newHealthTestClient(t, server)
 
 	if err := markServingAfterCheck(healthServer, func() error { return nil }); err != nil {
@@ -31,7 +37,10 @@ func TestMarkServingAfterCheckPublishesServing(t *testing.T) {
 }
 
 func TestMarkServingAfterCheckKeepsNotServingOnFailure(t *testing.T) {
-	server, healthServer := newGRPCServer(nil, []string{"go"})
+	server, healthServer, err := newGRPCServer(nil, []string{"go"}, 1)
+	if err != nil {
+		t.Fatalf("newGRPCServer: %v", err)
+	}
 	client := newHealthTestClient(t, server)
 
 	wantErr := errors.New("cgroup unavailable")
