@@ -63,7 +63,7 @@ func (c *Compiler) Compile(ctx context.Context, sourceCode, hostRunDir string) (
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	startTime := time.Now()
-	log.Printf("Compiling on host: go %s", strings.Join(cmdArgs, " "))
+	log.Printf("sandbox event=compile_started language=go")
 
 	err = cmd.Run()
 	duration := time.Since(startTime)
@@ -72,21 +72,21 @@ func (c *Compiler) Compile(ctx context.Context, sourceCode, hostRunDir string) (
 	if err != nil {
 		// Check for timeout first
 		if errors.Is(compileCtx.Err(), context.DeadlineExceeded) {
-			log.Printf("Compile timeout after %v. Stderr: %s", duration, compileOutput)
+			log.Printf("sandbox event=compile_finished language=go category=timeout duration_ms=%d diagnostic_bytes=%d", duration.Milliseconds(), len(compileOutput))
 			return "", compileOutput, fmt.Errorf("%w: %v", ErrCompileTimeout, compileCtx.Err())
 		}
 		// Other compilation error (e.g., syntax error)
-		log.Printf("Compile failed after %v: %v. Stderr: %s", duration, err, compileOutput)
+		log.Printf("sandbox event=compile_finished language=go category=compile_failed duration_ms=%d diagnostic_bytes=%d", duration.Milliseconds(), len(compileOutput))
 		// Wrap the original error from cmd.Run
 		return "", compileOutput, fmt.Errorf("%w: %v", ErrCompileFailed, err)
 	}
 
 	// 5. Verify binary exists
 	if _, statErr := os.Stat(binaryPath); statErr != nil {
-		log.Printf("Compiled binary not found at %s after successful compile command: %v", binaryPath, statErr)
+		log.Printf("sandbox event=compile_finished language=go category=binary_missing duration_ms=%d diagnostic_bytes=%d", duration.Milliseconds(), len(compileOutput))
 		return "", compileOutput, fmt.Errorf("%w: %w", ErrBinaryNotFound, statErr)
 	}
 
-	log.Printf("Compile successful in %v. Binary at: %s", duration, binaryPath)
+	log.Printf("sandbox event=compile_finished language=go category=ok duration_ms=%d diagnostic_bytes=%d", duration.Milliseconds(), len(compileOutput))
 	return binaryPath, compileOutput, nil
 }

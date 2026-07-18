@@ -125,8 +125,17 @@ func main() {
 	}
 
 	if *verbose {
-		log.Println("--- 详细响应信息 ---")
-		log.Printf("%+v\n", resp)
+		log.Printf(
+			"响应元数据: Status=%s ExitCode=%d Time=%dms Memory=%dKB StdoutBytes=%d StderrBytes=%d CompileErrorBytes=%d ErrorBytes=%d",
+			resp.Status,
+			resp.ExitCode,
+			resp.TimeUsed,
+			resp.MemoryUsed,
+			len(resp.Stdout),
+			len(resp.Stderr),
+			len(resp.CompileError),
+			len(resp.Error),
+		)
 	}
 
 	log.Println("客户端执行完毕")

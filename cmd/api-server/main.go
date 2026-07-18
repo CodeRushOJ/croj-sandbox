@@ -63,7 +63,6 @@ func newGRPCServer(api sandboxExecutor, supportedLangs []string, concurrency int
 
 // Execute 方法实现了 gRPC 服务接口
 func (s *server) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb.ExecuteResponse, error) {
-	log.Printf("收到 gRPC 请求: Language=%s", req.Language)
 	if err := ctx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
 	}
@@ -82,12 +81,13 @@ func (s *server) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb.Execu
 	}
 
 	if !langSupported {
-		log.Printf("不支持的语言: %s", requestLang)
+		log.Printf("sandbox event=request_rejected category=unsupported_language")
 		return &pb.ExecuteResponse{
 			Status: "Error",
 			Error:  fmt.Sprintf("不支持的编程语言: %s", requestLang),
 		}, nil // 返回错误信息，但不返回 gRPC 错误
 	}
+	log.Printf("sandbox event=request_received language=%s", requestLang)
 
 	release, admitted := s.limiter.tryAcquire()
 	if !admitted {
@@ -162,8 +162,32 @@ func (s *server) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb.Execu
 		MemoryUsed:   resp.MemoryUsed, // Already in KB
 	}
 
-	log.Printf("执行完成: Status=%s, Time=%dms, Memory=%dKB", grpcResp.Status, grpcResp.TimeUsed, grpcResp.MemoryUsed)
+	verdict, category := safeResultMetadata(grpcResp.Status)
+	log.Printf("sandbox event=request_finished language=%s verdict=%s category=%s exit_code=%d time_ms=%d memory_kb=%d", requestLang, verdict, category, grpcResp.ExitCode, grpcResp.TimeUsed, grpcResp.MemoryUsed)
 	return grpcResp, nil
+}
+
+func safeResultMetadata(statusValue string) (verdict, category string) {
+	switch sandbox.Status(statusValue) {
+	case sandbox.StatusAccepted:
+		return string(sandbox.StatusAccepted), "ok"
+	case sandbox.StatusWrongAnswer:
+		return string(sandbox.StatusWrongAnswer), "output_mismatch"
+	case sandbox.StatusCompileError:
+		return string(sandbox.StatusCompileError), "compile_failed"
+	case sandbox.StatusRuntimeError:
+		return string(sandbox.StatusRuntimeError), "runtime_failed"
+	case sandbox.StatusTimeLimitExceeded:
+		return string(sandbox.StatusTimeLimitExceeded), "time_limit"
+	case sandbox.StatusMemoryLimitExceeded:
+		return string(sandbox.StatusMemoryLimitExceeded), "memory_limit"
+	case sandbox.StatusOutputLimitExceeded:
+		return string(sandbox.StatusOutputLimitExceeded), "output_limit"
+	case sandbox.StatusSandboxError:
+		return string(sandbox.StatusSandboxError), "sandbox_failed"
+	default:
+		return string(sandbox.StatusUnknown), "unknown"
+	}
 }
 
 func main() {

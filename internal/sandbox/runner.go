@@ -19,7 +19,11 @@ import (
 // Runner orchestrates the local code compilation and execution simulation using LanguageConfig.
 type Runner struct {
 	cfg      Config
-	executor *Executor
+	executor commandExecutor
+}
+
+type commandExecutor interface {
+	Execute(context.Context, []string, map[string]string, *string) Result
 }
 
 // NewRunner creates a new local sandbox runner instance.
@@ -27,11 +31,9 @@ func NewRunner(cfg Config) (*Runner, error) {
 	if err := util.EnsureDir(cfg.HostTempDir); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrHostTempDir, err)
 	}
-	executor := NewExecutor(cfg)
-	log.Printf("Local sandbox runner initialized: HostTemp='%s'", cfg.HostTempDir)
+	log.Printf("sandbox event=runner_initialized")
 	return &Runner{
-		cfg:      cfg,
-		executor: executor,
+		cfg: cfg,
 	}, nil
 }
 
@@ -42,21 +44,21 @@ func (r *Runner) Run(ctx context.Context, language, sourceCode string, stdinData
 
 // RunWithConfig 使用自定义配置运行代码
 func (r *Runner) RunWithConfig(ctx context.Context, language, sourceCode string, stdinData *string, expectedOutput *string, cfg Config) Result {
-	util.DebugLog("Runner: 执行超时设置: %.2f秒, 用户指定: %v", 
+	util.DebugLog("Runner: 执行超时设置: %.2f秒, 用户指定: %v",
 		cfg.DefaultExecuteTimeLimit.Seconds(), cfg.UserSpecifiedTimeout)
-	
+
 	// 1. Get Language Configuration
 	langCfg, ok := cfg.Languages[language]
-	if (!ok) {
+	if !ok {
 		err := fmt.Errorf("language configuration for '%s' not found", language)
-		log.Printf("%v", err)
+		log.Printf("sandbox event=request_rejected category=unsupported_language")
 		return NewResult(StatusSandboxError, err)
 	}
 
 	// 2. Setup temporary directory
 	hostRunDir, cleanup, err := util.SetupHostRunDir(cfg.HostTempDir)
 	if err != nil {
-		util.ErrorLog("创建临时目录失败: %v", err)
+		util.ErrorLog("sandbox event=setup_failed category=temp_directory")
 		return NewResult(StatusSandboxError, fmt.Errorf("%w: %w", ErrHostTempDir, err))
 	}
 	defer cleanup()
@@ -68,10 +70,10 @@ func (r *Runner) RunWithConfig(ctx context.Context, language, sourceCode string,
 	}
 	sourceFilePath := filepath.Join(hostRunDir, srcFileName)
 	if err := os.WriteFile(sourceFilePath, []byte(sourceCode), 0644); err != nil {
-		log.Printf("Error writing source code to %s: %v", sourceFilePath, err)
+		log.Printf("sandbox event=setup_failed language=%s category=source_write", language)
 		return NewResult(StatusSandboxError, fmt.Errorf("failed to write source file: %w", err))
 	}
-	log.Printf("[%s] Source code saved to: %s", language, sourceFilePath)
+	util.DebugLog("sandbox event=source_staged language=%s bytes=%d", language, len(sourceCode))
 
 	// --- 4. Compile Step ---
 	var compileOutput string
@@ -79,7 +81,7 @@ func (r *Runner) RunWithConfig(ctx context.Context, language, sourceCode string,
 	var compileErr error
 
 	if langCfg.Compile.CompileCommand != "" {
-		log.Printf("[%s] Starting compilation phase.", language)
+		log.Printf("sandbox event=compile_started language=%s", language)
 		compileStartTime := time.Now()
 		exeName := langCfg.Compile.ExeName
 		if exeName == "" {
@@ -105,7 +107,6 @@ func (r *Runner) RunWithConfig(ctx context.Context, language, sourceCode string,
 		var stderr, stdout bytes.Buffer
 		cmd.Stderr = &stderr
 		cmd.Stdout = &stdout
-		log.Printf("[%s] Executing Compile: sh -c \"%s\"", language, compileCmdStr)
 		runCompileErr := cmd.Run()
 		compileOutput = stdout.String() + stderr.String()
 		compileDuration := time.Since(compileStartTime)
@@ -114,10 +115,10 @@ func (r *Runner) RunWithConfig(ctx context.Context, language, sourceCode string,
 		if runCompileErr != nil {
 			if errors.Is(compileCtx.Err(), context.DeadlineExceeded) {
 				compileErr = fmt.Errorf("%w (limit: %v)", ErrCompileTimeout, compileTimeout)
-				log.Printf("[%s] Compile timeout after %v. Output: %s", language, compileDuration, compileOutput)
+				log.Printf("sandbox event=compile_finished language=%s category=timeout duration_ms=%d diagnostic_bytes=%d", language, compileDuration.Milliseconds(), len(compileOutput))
 			} else {
 				compileErr = fmt.Errorf("%w: %v", ErrCompileFailed, runCompileErr)
-				log.Printf("[%s] Compile failed after %v: %v. Output: %s", language, compileDuration, runCompileErr, compileOutput)
+				log.Printf("sandbox event=compile_finished language=%s category=compile_failed duration_ms=%d diagnostic_bytes=%d", language, compileDuration.Milliseconds(), len(compileOutput))
 			}
 		} else {
 			// Verify executable existence (heuristic)
@@ -125,13 +126,13 @@ func (r *Runner) RunWithConfig(ctx context.Context, language, sourceCode string,
 			isCompiledLang := language == "go" || language == "cpp" // Add other compiled languages here
 			if statErr != nil && isCompiledLang {
 				compileErr = fmt.Errorf("%w '%s': %w", ErrBinaryNotFound, compiledExePath, statErr)
-				log.Printf("[%s] %v", language, compileErr)
+				log.Printf("sandbox event=compile_finished language=%s category=binary_missing duration_ms=%d diagnostic_bytes=%d", language, compileDuration.Milliseconds(), len(compileOutput))
 			} else {
-				log.Printf("[%s] Compile successful in %v.", language, compileDuration)
+				log.Printf("sandbox event=compile_finished language=%s category=ok duration_ms=%d diagnostic_bytes=%d", language, compileDuration.Milliseconds(), len(compileOutput))
 			}
 		}
 	} else {
-		log.Printf("[%s] Skipping compilation phase.", language)
+		util.DebugLog("sandbox event=compile_skipped language=%s", language)
 	}
 
 	// Handle Compile Error Result
@@ -145,15 +146,15 @@ func (r *Runner) RunWithConfig(ctx context.Context, language, sourceCode string,
 	}
 
 	// --- 5. Execute Step ---
-	util.InfoLog("[%s] 开始执行阶段", language)
+	util.InfoLog("sandbox event=execute_started language=%s", language)
 	memLimitBytes := langCfg.GetMemoryLimit(cfg.DefaultExecuteMemoryLimit)
 	memLimitKB := memLimitBytes / 1024
-	
+
 	// 从语言配置中获取运行时间限制，但考虑用户是否指定了超时
 	timeoutDuration := langCfg.GetExecuteTimeout(cfg.DefaultExecuteTimeLimit, cfg.UserSpecifiedTimeout)
-	util.DebugLog("[%s] 设置时间限制: %.2f秒 (用户指定: %v)", 
+	util.DebugLog("[%s] 设置时间限制: %.2f秒 (用户指定: %v)",
 		language, timeoutDuration.Seconds(), cfg.UserSpecifiedTimeout)
-	
+
 	// 处理命令模板
 	runPlaceholders := map[string]string{
 		PlaceholderExePath: compiledExePath, PlaceholderWorkDir: hostRunDir,
@@ -163,44 +164,44 @@ func (r *Runner) RunWithConfig(ctx context.Context, language, sourceCode string,
 	runCmdParts, templateErr := util.ProcessCommandTemplate(langCfg.Run.Command, runPlaceholders)
 	if templateErr != nil {
 		err := fmt.Errorf("failed to process run command template for '%s': %w", language, templateErr)
-		log.Printf("%v", err)
+		log.Printf("sandbox event=execute_failed language=%s category=command_template", language)
 		res := NewResult(StatusSandboxError, err)
 		res.CompileOutput = compileOutput
 		return res
 	}
-	
+
 	// 确保超时设置被正确传递到执行器
 	runCfg := cfg
 	runCfg.DefaultExecuteTimeLimit = timeoutDuration
 	util.DebugLog("[%s] 传递到执行器的超时设置: %.2f seconds", language, runCfg.DefaultExecuteTimeLimit.Seconds())
-	
-	executor := NewExecutor(runCfg)
+
+	executor := r.executor
+	if executor == nil {
+		executor = NewExecutor(runCfg)
+	}
 	execResult := executor.Execute(ctx, runCmdParts, langCfg.Run.Env, stdinData)
 	execResult.CompileOutput = compileOutput // Add compile output regardless of exec status
 
 	// --- 6. Output Comparison Step ---
 	// Only compare if execution was successful so far (status Accepted) and expected output is provided.
 	if execResult.Status == StatusAccepted && expectedOutput != nil {
-		log.Printf("[%s] Comparing output...", language)
 		match := util.CompareOutputs(execResult.Stdout, *expectedOutput)
 		if !match {
-			log.Printf("[%s] Output mismatch!", language)
-			log.Printf("[%s] Expected: %q", language, util.NormalizeString(*expectedOutput))
-			log.Printf("[%s] Actual: %q", language, util.NormalizeString(execResult.Stdout))
+			log.Printf("sandbox event=output_compared language=%s category=mismatch expected_bytes=%d actual_bytes=%d", language, len(*expectedOutput), len(execResult.Stdout))
 			execResult.Status = StatusWrongAnswer
 			// Add more detail to the error field
 			execResult.Error = ErrOutputMismatch.Error()
 		} else {
-			log.Printf("[%s] Output matches expected.", language)
+			log.Printf("sandbox event=output_compared language=%s category=match expected_bytes=%d actual_bytes=%d", language, len(*expectedOutput), len(execResult.Stdout))
 			// Status remains Accepted
 		}
 	} else if execResult.Status == StatusAccepted && expectedOutput == nil {
-		log.Printf("[%s] Skipping output comparison (no expected output provided).", language)
+		util.DebugLog("sandbox event=output_comparison_skipped language=%s category=no_expected_output", language)
 	} else if expectedOutput != nil {
-		log.Printf("[%s] Skipping output comparison (execution status is %s, not Accepted)", language, execResult.Status)
+		util.DebugLog("sandbox event=output_comparison_skipped language=%s category=execution_failed verdict=%s", language, execResult.Status)
 	}
 
-	util.InfoLog("[%s] 最终执行结果: %s", language, execResult.Status)
+	util.InfoLog("sandbox event=execution_finished language=%s verdict=%s exit_code=%d time_ms=%d memory_kb=%d", language, execResult.Status, execResult.ExitCode, execResult.TimeUsedMillis, execResult.MemoryUsedKB)
 	return execResult
 }
 

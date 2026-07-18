@@ -86,6 +86,19 @@ API Server 使用命令行参数：
 
 收到终止信号后，服务先把 health 改为 `NOT_SERVING`，`grpc.GracefulStop` 停止接受新 RPC 并等待已 admission 的执行完成；对应特征测试会验证这两个条件。当前 drain 尚无独立 deadline，过长执行可能超过 Kubernetes termination grace 后被 SIGKILL；有界 drain、执行 context 传播和强制清理由 [Issue #7](https://github.com/CodeRushOJ/croj-sandbox/issues/7) 跟踪。
 
+### 评测数据与日志
+
+源码、stdin、隐藏 expected output、contestant stdout/stderr 和编译器诊断都属于评测 payload，不得进入 sandbox 服务日志。该约束在默认日志和 `CROJ_DEBUG=1` 下完全相同；debug 模式不是数据脱敏的逃生口。
+
+服务端只记录受支持的语言标识、verdict、exit code、有界的耗时/内存/字节计数，以及 `compile_failed`、`output_mismatch` 等稳定分类。编译器诊断仍会通过 `CompileError` 返回给已授权的调用方，stdout/stderr 也仍保留在执行响应中；仓库的 `simple-client` 是交互式消费者，因此会按用户显式调用打印这些响应字段，但 verbose 日志只输出长度与执行元数据。
+
+新增或修改日志时必须遵守以下规则：
+
+- 不展开请求、响应、执行命令、环境变量或临时目录路径；
+- 不把底层错误、编译输出或 WA expected/actual 直接传给日志格式化函数；
+- 使用稳定 `event`/`category` 和有界数值字段；
+- 扩展 sentinel 回归测试，同时覆盖默认和 debug 两条路径。
+
 ## 本地构建与测试
 
 构建依赖：
@@ -177,6 +190,7 @@ spec:
 - cgroup 创建需要节点级权限，生产部署必须使用隔离节点池
 - 仓库中的 Kind 清单使用 privileged、host PID、主机 cgroup 挂载和 `nsenter`，只能用于本地开发
 - 镜像包含多语言工具链，后续应拆分为按语言版本化的运行时镜像
+- 服务日志主动排除源码、测试输入、隐藏答案、程序输出和编译诊断；日志聚合系统不应被视为评测 payload 存储
 
 在这些事项完成安全评审前，不应向匿名公网开放 Execute 接口。生产目标是 Kubernetes 专用沙箱节点池、无外网网络策略、只读根文件系统、独立 RuntimeClass，以及可审计的语言镜像供应链。
 

@@ -20,12 +20,16 @@
 - 删除 ZooKeeper 注册与客户端发现，调度统一交给 Kubernetes EndpointSlice
 - cgroup v2 在父级正确委派 memory/cpu/pids controller，并按 Pod UID 隔离 cgroup 名称
 - Go 构建与运行工具链升级至 1.24.6，Java 镜像从 JRE 改为 JDK 17
+- sandbox 日志改为稳定的 `event`/`category` 与有界指标；verbose CLI 日志只显示响应字段长度和执行元数据
 
 ### Fixed
 
 - 修复 cgroup v2 清理被误判为 v1 的问题
 - 修复不同 Pod 内相同 namespace PID 可能复用主机 cgroup 的问题
 - 修复最终镜像缺少 Go 编译器和 `javac` 的问题
+- 修复编译失败日志泄露编译诊断或源码片段，以及 Wrong Answer 日志泄露隐藏 expected output 和 contestant stdout 的问题
+- 增加默认与 `CROJ_DEBUG` 模式的 sentinel 回归测试，覆盖 runner、legacy compiler、executor、gRPC 和临时目录日志边界
+- 修复命令启动失败时 stdin 写入 goroutine 可能晚于执行器返回的问题，确保失败路径没有悬空日志写入
 
 ## 0.2.0 - 2025-04-25
 

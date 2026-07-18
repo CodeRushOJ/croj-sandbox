@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"os/exec"
 
 	"github.com/google/uuid"
 )
@@ -28,13 +28,13 @@ func SetupHostRunDir(baseDir string) (runDir string, cleanup func(), err error) 
 	if err := os.Mkdir(runDir, 0755); err != nil {
 		return "", nil, fmt.Errorf("failed to create host run temp dir %s: %w", runDir, err)
 	}
-	log.Printf("Created host temp dir: %s", runDir)
+	DebugLog("sandbox event=temp_directory_created")
 
 	cleanup = func() {
 		if err := os.RemoveAll(runDir); err != nil {
-			log.Printf("Warning: failed to clean up host temp dir %s: %v", runDir, err)
+			log.Printf("sandbox event=temp_directory_cleanup category=failed")
 		} else {
-			log.Printf("Cleaned up host temp dir: %s", runDir)
+			DebugLog("sandbox event=temp_directory_cleanup category=ok")
 		}
 	}
 
@@ -43,11 +43,11 @@ func SetupHostRunDir(baseDir string) (runDir string, cleanup func(), err error) 
 
 // EnsureDir creates a directory if it doesn't exist
 func EnsureDir(dirName string) error {
-    err := os.MkdirAll(dirName, 0755)
-    if err != nil {
-        return fmt.Errorf("failed to create directory %s: %w", dirName, err)
-    }
-    return nil
+	err := os.MkdirAll(dirName, 0755)
+	if err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", dirName, err)
+	}
+	return nil
 }
 
 // ProcessCommandString replaces placeholders in a command string with actual values
@@ -65,13 +65,13 @@ func ProcessCommandTemplate(cmdTemplate string, replacements map[string]string) 
 	if cmdStr == "" {
 		return nil, fmt.Errorf("empty command after processing")
 	}
-	
+
 	// 简单拆分命令，将命令拆为数组 (不处理复杂引号)
 	cmdParts := strings.Fields(cmdStr)
 	if len(cmdParts) == 0 {
 		return nil, fmt.Errorf("no command parts after splitting")
 	}
-	
+
 	return cmdParts, nil
 }
 
@@ -81,7 +81,7 @@ func CompareOutputs(actual, expected string) bool {
 	// 标准化字符串
 	actual = NormalizeString(actual)
 	expected = NormalizeString(expected)
-	
+
 	return actual == expected
 }
 
@@ -101,5 +101,5 @@ func NormalizeString(s string) string {
 
 // LookPath is a wrapper around exec.LookPath
 func LookPath(file string) (string, error) {
-    return exec.LookPath(file)
+	return exec.LookPath(file)
 }
