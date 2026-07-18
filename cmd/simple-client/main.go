@@ -5,14 +5,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"strings"
+	"os"
 	"time"
-	"encoding/json"
 
 	pb "github.com/CodeRushOJ/croj-sandbox/proto"
-	"github.com/CodeRushOJ/croj-sandbox/internal/util"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -25,8 +22,6 @@ var (
 	timeout    = flag.Int("t", 3, "执行超时时间（秒）")
 	memory     = flag.Int("m", 512, "内存限制（MB）")
 	verbose    = flag.Bool("v", false, "详细模式，显示更多调试信息")
-	zkAddr = flag.String("zk", "localhost:2181", "zookeeper 地址，多个用逗号分隔")
-	zkRoot = flag.String("zk-root", "/croj/sandbox", "zookeeper 根路径")
 )
 
 func main() {
@@ -38,9 +33,15 @@ func main() {
 	if *sourceFile == "" {
 		log.Fatal("错误：必须提供源代码文件路径 (-src)")
 	}
+	if *timeout <= 0 {
+		log.Fatal("错误：执行超时 (-t) 必须大于 0")
+	}
+	if *memory <= 0 {
+		log.Fatal("错误：内存限制 (-m) 必须大于 0")
+	}
 
 	// 读取源代码文件
-	sourceCodeBytes, err := ioutil.ReadFile(*sourceFile)
+	sourceCodeBytes, err := os.ReadFile(*sourceFile)
 	if err != nil {
 		log.Fatalf("读取源代码文件 '%s' 失败: %v", *sourceFile, err)
 	}
@@ -49,37 +50,12 @@ func main() {
 	// 读取标准输入文件（如果提供）
 	var stdinContent string
 	if *stdinFile != "" {
-		stdinBytes, err := ioutil.ReadFile(*stdinFile)
+		stdinBytes, err := os.ReadFile(*stdinFile)
 		if err != nil {
 			log.Fatalf("读取标准输入文件 '%s' 失败: %v", *stdinFile, err)
 		}
 		stdinContent = string(stdinBytes)
 	}
-
-	// 通过 zookeeper 发现可用节点
-	zkAddrs := strings.Split(*zkAddr, ",")
-	zkClient, err := util.NewZkClient(zkAddrs)
-	if err != nil {
-		log.Fatalf("Zookeeper 连接失败: %v", err)
-	}
-	defer zkClient.Close()
-
-	// 发现负载最低的节点
-	bestNodeData, err := zkClient.Discover(*zkRoot)
-	if err != nil {
-		log.Fatalf("服务发现失败: %v", err)
-	}
-	var nodeInfo struct {
-		Ip   string  `json:"ip"`
-		Port int     `json:"port"`
-		Cpu  float64 `json:"cpu"`
-	}
-	err = json.Unmarshal([]byte(bestNodeData), &nodeInfo)
-	if err != nil {
-		log.Fatalf("解析节点信息失败: %v", err)
-	}
-	server := fmt.Sprintf("%s:%d", nodeInfo.Ip, nodeInfo.Port)
-	log.Printf("选择节点: %s (CPU: %.2f%%)", server, nodeInfo.Cpu)
 
 	// 设置 gRPC 连接选项
 	opts := []grpc.DialOption{
@@ -87,8 +63,10 @@ func main() {
 		grpc.WithBlock(),
 	}
 	// 连接到 gRPC 服务器
-	log.Printf("连接到 gRPC 服务器 %s...", server)
-	conn, err := grpc.Dial(server, opts...)
+	log.Printf("连接到 gRPC 服务器 %s...", *serverAddr)
+	dialContext, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dialCancel()
+	conn, err := grpc.DialContext(dialContext, *serverAddr, opts...)
 	if err != nil {
 		log.Fatalf("连接服务器失败: %v", err)
 	}

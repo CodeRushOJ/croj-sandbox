@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: croj-sandbox
+  namespace: coderushoj
+  labels:
+    app.kubernetes.io/name: croj-sandbox
+    app.kubernetes.io/component: sandbox
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: croj-sandbox
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: croj-sandbox
+        app.kubernetes.io/component: sandbox
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostPID: true
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        coderushoj.dev/sandbox: "true"
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: croj-sandbox
+      containers:
+        - name: sandbox
+          image: coderushoj/croj-sandbox:dev
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/bin/nsenter
+          args:
+            - --cgroup=/proc/1/ns/cgroup
+            - --
+            - /app/api-server
+          env:
+            - name: CROJ_SANDBOX_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: HOME
+              value: /tmp
+            - name: GOCACHE
+              value: /tmp/go-build-cache
+          ports:
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+          readinessProbe:
+            grpc:
+              port: 50051
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          livenessProbe:
+            grpc:
+              port: 50051
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 500m
+              memory: 768Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: true
+            runAsUser: 0
+          volumeMounts:
+            - name: temp
+              mountPath: /tmp
+            - name: cgroup
+              mountPath: /sys/fs/cgroup
+      volumes:
+        - name: temp
+          emptyDir:
+            sizeLimit: 4Gi
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory

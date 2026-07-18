@@ -25,10 +25,9 @@ go.work.sum
 .env
 
 # test
-simple-client
-api-server
+/simple-client
+/api-server
 
 # config
 .IDEA/
 .vscode/
-

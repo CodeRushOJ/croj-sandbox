@@ -13,21 +13,19 @@ import (
 	"syscall"
 	"time"
 
-	"encoding/json"
 	"github.com/CodeRushOJ/croj-sandbox/internal/sandbox"
-	"github.com/CodeRushOJ/croj-sandbox/internal/util"
 	pb "github.com/CodeRushOJ/croj-sandbox/proto"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 )
 
 var (
-	port     = flag.Int("port", 50051, "gRPC 服务端口") // 默认 gRPC 端口
-	tempDir  = flag.String("temp-dir", "", "临时目录路径，为空则使用默认路径")
-	execTime = flag.Int("exec-timeout", 3, "执行超时时间（秒）")
+	port      = flag.Int("port", 50051, "gRPC 服务端口") // 默认 gRPC 端口
+	tempDir   = flag.String("temp-dir", "", "临时目录路径，为空则使用默认路径")
+	execTime  = flag.Int("exec-timeout", 3, "执行超时时间（秒）")
 	languages = flag.String("languages", "go,cpp,python,java,javascript", "支持的语言列表（逗号分隔）")
-	zkAddr = flag.String("zk", "localhost:2181", "zookeeper 地址，多个用逗号分隔")
-	zkRoot = flag.String("zk-root", "/croj/sandbox", "zookeeper 根路径")
 )
 
 // server 结构体实现了 SandboxServiceServer 接口
@@ -35,6 +33,19 @@ type server struct {
 	pb.UnimplementedSandboxServiceServer
 	api            *sandbox.SandboxAPI
 	supportedLangs []string
+}
+
+func newGRPCServer(api *sandbox.SandboxAPI, supportedLangs []string) (*grpc.Server, *health.Server) {
+	grpcServer := grpc.NewServer()
+	pb.RegisterSandboxServiceServer(grpcServer, &server{
+		api:            api,
+		supportedLangs: supportedLangs,
+	})
+	healthServer := health.NewServer()
+	healthpb.RegisterHealthServer(grpcServer, healthServer)
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+	reflection.Register(grpcServer)
+	return grpcServer, healthServer
 }
 
 // Execute 方法实现了 gRPC 服务接口
@@ -142,41 +153,14 @@ func main() {
 		log.Fatalf("监听端口 %d 失败: %v", *port, err)
 	}
 
-	grpcServer := grpc.NewServer()
-	pb.RegisterSandboxServiceServer(grpcServer, &server{
-		api:            api,
-		supportedLangs: supportedLangs,
-	})
-
-	// 注册反射服务，以便 grpcurl 等工具可以使用
-	reflection.Register(grpcServer)
+	grpcServer, healthServer := newGRPCServer(api, supportedLangs)
+	if err := markServingAfterCheck(healthServer, func() error {
+		return checkStartupDependencies(cfg, supportedLangs)
+	}); err != nil {
+		log.Fatalf("沙箱启动自检失败: %v", err)
+	}
 
 	log.Printf("gRPC 服务器正在监听端口 %d", *port)
-
-	// 初始化 Zookeeper 客户端
-	zkAddrs := strings.Split(*zkAddr, ",")
-	zkClient, err := util.NewZkClient(zkAddrs)
-	if err != nil {
-		log.Fatalf("Zookeeper 连接失败: %v", err)
-	}
-	defer zkClient.Close()
-
-	// 定时上报节点性能数据
-	go func() {
-		for {
-			cpu := getCPUPercent()
-			ip := "127.0.0.1" // 可用实际 IP 获取逻辑
-			data := map[string]interface{}{
-				"ip": ip,
-				"port": *port,
-				"cpu": cpu,
-			}
-			jsonData, _ := json.Marshal(data)
-			zkPath := *zkRoot + "/" + ip + "-" + fmt.Sprint(*port)
-			_ = zkClient.Register(zkPath, string(jsonData), 10)
-			time.Sleep(5 * time.Second)
-		}
-	}()
 
 	// 优雅关闭
 	go func() {
@@ -184,6 +168,7 @@ func main() {
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		<-sigChan
 		log.Println("接收到关闭信号，停止 gRPC 服务...")
+		healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
 		grpcServer.GracefulStop()
 		log.Println("gRPC 服务已成功关闭")
 	}()
@@ -191,47 +176,4 @@ func main() {
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("启动 gRPC 服务失败: %v", err)
 	}
-
-	// // 初始化 Zookeeper 客户端  <-- This block is removed by not including it here
-	// zkAddrs := strings.Split(*zkAddr, ",")
-	// zkClient, err := util.NewZkClient(zkAddrs)
-	// if err != nil {
-	// 	log.Fatalf("Zookeeper 连接失败: %v", err)
-	// }
-	// defer zkClient.Close()
-
-	// // 定时上报节点性能数据
-	// go func() {
-	// 	for {
-	// 		cpu := getCPUPercent()
-	// 		ip := "127.0.0.1" // 可用实际 IP 获取逻辑
-	// 		data := map[string]interface{}{
-	// 			"ip": ip,
-	// 			"port": *port,
-	// 			"cpu": cpu,
-	// 		}
-	// 		jsonData, _ := json.Marshal(data)
-	// 		zkPath := *zkRoot + "/" + ip + "-" + fmt.Sprint(*port)
-	// 		_ = zkClient.Register(zkPath, string(jsonData), 10)
-	// 		time.Sleep(5 * time.Second)
-	// 	}
-	// }()
-}
-
-// 获取本机 IP
-func getLocalIP() string {
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return ""
-	}
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
-			return ipnet.IP.String()
-		}
-	}
-	return ""
-}
-// 获取 CPU 利用率（简单实现，生产建议用更专业库）
-func getCPUPercent() float64 {
-	return 0.0 // TODO: 可用第三方库实现真实 CPU 采集
 }

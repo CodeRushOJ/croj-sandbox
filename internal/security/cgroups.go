@@ -5,9 +5,30 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/CodeRushOJ/croj-sandbox/internal/util"
 )
+
+// CgroupIDForProcess returns a host-unique, path-safe cgroup name. Kubernetes
+// injects the Pod UID so equal namespace-local PIDs in different Pods cannot
+// share a host cgroup.
+func CgroupIDForProcess(prefix string, pid int) string {
+	instanceID := os.Getenv("CROJ_SANDBOX_INSTANCE_ID")
+	if instanceID == "" {
+		instanceID, _ = os.Hostname()
+	}
+	raw := fmt.Sprintf("%s_%s_%d", prefix, instanceID, pid)
+	return strings.Map(func(character rune) rune {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '-' || character == '_' {
+			return character
+		}
+		return '_'
+	}, raw)
+}
 
 // SetupCgroups 设置cgroup资源限制
 func SetupCgroups(cgroupID string, pid int, profile *SecurityProfile) (*CgroupManager, error) {
@@ -40,14 +61,10 @@ func CleanupCgroups(manager *CgroupManager) error {
 	// 删除cgroup目录
 	util.DebugLog("清理cgroup: %s", manager.GroupID)
 
-	// 检查cgroup版本并执行对应的清理
-	if manager.BasePath == "/sys/fs/cgroup/unified" {
-		// cgroup v2清理
+	if manager.Version == 2 {
 		return cleanupCgroupV2(manager)
-	} else {
-		// cgroup v1清理
-		return cleanupCgroupV1(manager)
 	}
+	return cleanupCgroupV1(manager)
 }
 
 // detectCgroupVersion 检测系统使用的cgroup版本
@@ -70,6 +87,7 @@ func detectCgroupVersion() int {
 func setupCgroupsV1(cgroupID string, pid int, profile *SecurityProfile) (*CgroupManager, error) {
 	manager := &CgroupManager{
 		GroupID: cgroupID,
+		Version: 1,
 	}
 
 	// 创建内存控制器
@@ -83,7 +101,7 @@ func setupCgroupsV1(cgroupID string, pid int, profile *SecurityProfile) (*Cgroup
 	if err := os.MkdirAll(cpuCgroupPath, 0755); err != nil {
 		return nil, fmt.Errorf("创建CPU cgroup失败: %w", err)
 	}
-	
+
 	// 创建pids控制器
 	pidsCgroupPath := filepath.Join("/sys/fs/cgroup/pids", "croj", cgroupID)
 	if err := os.MkdirAll(pidsCgroupPath, 0755); err != nil {
@@ -96,7 +114,7 @@ func setupCgroupsV1(cgroupID string, pid int, profile *SecurityProfile) (*Cgroup
 		if err := os.WriteFile(memLimitPath, []byte(fmt.Sprintf("%d", profile.MemoryLimitBytes)), 0644); err != nil {
 			return nil, fmt.Errorf("设置内存限制失败: %w", err)
 		}
-		
+
 		// 禁用内存交换，确保更准确的内存限制
 		swapLimitPath := filepath.Join(memCgroupPath, "memory.swappiness")
 		if err := os.WriteFile(swapLimitPath, []byte("0"), 0644); err != nil {
@@ -112,7 +130,7 @@ func setupCgroupsV1(cgroupID string, pid int, profile *SecurityProfile) (*Cgroup
 		if err := os.WriteFile(cpuQuotaPath, []byte(fmt.Sprintf("%d", cpuQuota)), 0644); err != nil {
 			return nil, fmt.Errorf("设置CPU配额失败: %w", err)
 		}
-		
+
 		// CPU周期（微秒）：默认100000
 		cpuPeriodPath := filepath.Join(cpuCgroupPath, "cpu.cfs_period_us")
 		if err := os.WriteFile(cpuPeriodPath, []byte("100000"), 0644); err != nil {
@@ -130,19 +148,19 @@ func setupCgroupsV1(cgroupID string, pid int, profile *SecurityProfile) (*Cgroup
 
 	// 将进程加入到cgroup
 	pidStr := strconv.Itoa(pid)
-	
+
 	// 添加到内存控制器
 	memTasksPath := filepath.Join(memCgroupPath, "tasks")
 	if err := os.WriteFile(memTasksPath, []byte(pidStr), 0644); err != nil {
 		return nil, fmt.Errorf("将进程添加到内存cgroup失败: %w", err)
 	}
-	
+
 	// 添加到CPU控制器
 	cpuTasksPath := filepath.Join(cpuCgroupPath, "tasks")
 	if err := os.WriteFile(cpuTasksPath, []byte(pidStr), 0644); err != nil {
 		return nil, fmt.Errorf("将进程添加到CPU cgroup失败: %w", err)
 	}
-	
+
 	// 添加到pids控制器
 	pidsTasksPath := filepath.Join(pidsCgroupPath, "tasks")
 	if err := os.WriteFile(pidsTasksPath, []byte(pidStr), 0644); err != nil {
@@ -151,7 +169,7 @@ func setupCgroupsV1(cgroupID string, pid int, profile *SecurityProfile) (*Cgroup
 
 	manager.BasePath = "/sys/fs/cgroup"
 	manager.Initialized = true
-	
+
 	return manager, nil
 }
 
@@ -159,19 +177,44 @@ func setupCgroupsV1(cgroupID string, pid int, profile *SecurityProfile) (*Cgroup
 func setupCgroupsV2(cgroupID string, pid int, profile *SecurityProfile) (*CgroupManager, error) {
 	manager := &CgroupManager{
 		GroupID: cgroupID,
+		Version: 2,
 	}
 
-	// cgroup v2的基础路径
-	cgroupPath := filepath.Join("/sys/fs/cgroup", "croj", cgroupID)
+	parentPath := filepath.Join("/sys/fs/cgroup", "croj")
+	if err := os.MkdirAll(parentPath, 0755); err != nil {
+		return nil, fmt.Errorf("创建cgroup v2父目录失败: %w", err)
+	}
+	controllers, err := os.ReadFile(filepath.Join(parentPath, "cgroup.controllers"))
+	if err != nil {
+		return nil, fmt.Errorf("读取cgroup v2控制器失败: %w", err)
+	}
+	available := make(map[string]bool)
+	for _, controller := range strings.Fields(string(controllers)) {
+		available[controller] = true
+	}
+	for _, required := range []string{"memory", "cpu", "pids"} {
+		if !available[required] {
+			return nil, fmt.Errorf("缺少cgroup v2控制器: %s", required)
+		}
+	}
+	if err := os.WriteFile(
+		filepath.Join(parentPath, "cgroup.subtree_control"),
+		[]byte("+memory +cpu +pids"),
+		0644,
+	); err != nil {
+		return nil, fmt.Errorf("委派cgroup v2控制器失败: %w", err)
+	}
+
+	cgroupPath := filepath.Join(parentPath, cgroupID)
 	if err := os.MkdirAll(cgroupPath, 0755); err != nil {
 		return nil, fmt.Errorf("创建cgroup v2目录失败: %w", err)
 	}
-
-	// 启用必要的控制器
-	controllersPath := filepath.Join(cgroupPath, "cgroup.subtree_control")
-	if err := os.WriteFile(controllersPath, []byte("+memory +cpu +pids"), 0644); err != nil {
-		return nil, fmt.Errorf("启用cgroup控制器失败: %w", err)
-	}
+	initialized := false
+	defer func() {
+		if !initialized {
+			_ = os.Remove(cgroupPath)
+		}
+	}()
 
 	// 设置内存限制
 	if profile.MemoryLimitBytes > 0 {
@@ -179,7 +222,7 @@ func setupCgroupsV2(cgroupID string, pid int, profile *SecurityProfile) (*Cgroup
 		if err := os.WriteFile(memLimitPath, []byte(fmt.Sprintf("%d", profile.MemoryLimitBytes)), 0644); err != nil {
 			return nil, fmt.Errorf("设置内存限制失败: %w", err)
 		}
-		
+
 		// 禁用内存交换
 		swapLimitPath := filepath.Join(cgroupPath, "memory.swap.max")
 		if err := os.WriteFile(swapLimitPath, []byte("0"), 0644); err != nil {
@@ -213,7 +256,8 @@ func setupCgroupsV2(cgroupID string, pid int, profile *SecurityProfile) (*Cgroup
 
 	manager.BasePath = "/sys/fs/cgroup"
 	manager.Initialized = true
-	
+	initialized = true
+
 	return manager, nil
 }
 
@@ -221,16 +265,16 @@ func setupCgroupsV2(cgroupID string, pid int, profile *SecurityProfile) (*Cgroup
 func cleanupCgroupV1(manager *CgroupManager) error {
 	// 在V1中，需要分别清理各个子系统
 	controllers := []string{"memory", "cpu", "pids"}
-	
+
 	for _, controller := range controllers {
 		cgroupPath := filepath.Join("/sys/fs/cgroup", controller, "croj", manager.GroupID)
-		
+
 		// 尝试删除目录
-		if err := os.RemoveAll(cgroupPath); err != nil {
+		if err := os.Remove(cgroupPath); err != nil && !os.IsNotExist(err) {
 			util.WarnLog("清理cgroup控制器目录失败 %s: %v", controller, err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -238,11 +282,11 @@ func cleanupCgroupV1(manager *CgroupManager) error {
 func cleanupCgroupV2(manager *CgroupManager) error {
 	// V2只需要删除一个目录
 	cgroupPath := filepath.Join("/sys/fs/cgroup", "croj", manager.GroupID)
-	
+
 	// 尝试删除目录
-	if err := os.RemoveAll(cgroupPath); err != nil {
+	if err := os.Remove(cgroupPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("清理cgroup v2目录失败: %w", err)
 	}
-	
+
 	return nil
 }
