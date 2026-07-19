@@ -7,6 +7,7 @@ CodeRushOJ 的代码编译与执行节点。服务通过 gRPC 接收评测请求
 ## 核心能力
 
 - gRPC `SandboxService.Execute` 执行协议
+- 版本化 `SandboxService.ExecuteBatchV1`：一次编译、顺序执行并流式返回最多 256 个测试点
 - Go、C++、Python、Java、JavaScript 五种语言运行配置
 - 编译超时、执行超时、内存监控与 64 KiB 标准输出/错误限制
 - `Accepted`、`Wrong Answer`、`Compile Error`、`Runtime Error`、`Time Limit Exceeded`、`Memory Limit Exceeded`、`Output Limit Exceeded`、`Sandbox Error` 等结果
@@ -49,10 +50,15 @@ examples/             多语言示例和输入输出
 ```protobuf
 service SandboxService {
   rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+  rpc ExecuteBatchV1(ExecuteBatchV1Request) returns (stream ExecuteBatchV1Event);
 }
 ```
 
 `ExecuteRequest` 可携带语言、源码、标准输入、超时、内存限制和预期输出；响应包含状态、退出码、stdout、stderr、编译错误、耗时和内存用量。未提供语言时默认使用 Go。
+
+`ExecuteBatchV1` 保留同一份源码和编译产物，在一个 admission slot 内按请求顺序启动独立 case 进程。每个进程仍独立应用执行超时、内存、cgroup/seccomp 与输出上限；`stop_on_failure=true` 时首个非 Accepted 结果后停止。事件只允许 `CASE_RESULT`、`COMPILE_ERROR` 和最终 `COMPLETED`。请求必须包含 1..256 个唯一非空 `case_id`，protobuf 编码后不得超过 64 MiB；judging-server 会在 RPC 前做同样的确定性检查。旧 `Execute` 不变，旧客户端可继续使用；judging-server 批量客户端必须和本版本同时发布。
+
+编译产物仅在单个 RPC 的私有临时目录中存在，不跨提交缓存。RPC 正常结束、编译失败、发送失败和 context 取消都清理源码及产物。整个 batch 只占一个 `max-concurrency` slot，满载仍在编译前返回 `ResourceExhausted`。
 
 默认监听 `0.0.0.0:50051`。标准健康服务名为空字符串。服务启动时先保持 `NOT_SERVING`；只有五语言工具链、临时目录写入和 cgroup 控制器自检全部通过后才切换为 `SERVING`，优雅退出前恢复 `NOT_SERVING`。因此 Kubernetes readiness 和 EndpointSlice 可调度状态与实际执行依赖保持一致。
 
@@ -197,6 +203,7 @@ spec:
 ## 开发约定
 
 - 协议变化必须同步更新生成代码、调度器契约测试和版本日志
+- `ExecuteBatchV1` 的发布顺序是先升级全部 sandbox Pod，再升级 judging-server；回滚时先回滚 judging-server
 - 新语言必须补充编译/运行/超时/错误场景测试与示例
 - 新功能从 Issue 分支开发，通过 PR、CI 和代码审查后合并
 - 仓库变更记录在 `CHANGELOG.md`，跨仓部署版本统一记录在平台 release notes

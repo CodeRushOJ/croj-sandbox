@@ -35,6 +35,10 @@ type sandboxExecutor interface {
 	Execute(sandbox.Request) sandbox.Response
 }
 
+type sandboxBatchExecutor interface {
+	ExecuteBatch(context.Context, sandbox.BatchRequest, func(sandbox.BatchCaseResponse) error) sandbox.Response
+}
+
 // server 结构体实现了 SandboxServiceServer 接口
 type server struct {
 	pb.UnimplementedSandboxServiceServer
@@ -48,7 +52,11 @@ func newGRPCServer(api sandboxExecutor, supportedLangs []string, concurrency int
 	if err != nil {
 		return nil, nil, err
 	}
-	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(recoveryUnaryServerInterceptor))
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(recoveryUnaryServerInterceptor),
+		grpc.StreamInterceptor(recoveryStreamServerInterceptor),
+		grpc.MaxRecvMsgSize(maxBatchMessageBytesV1),
+	)
 	pb.RegisterSandboxServiceServer(grpcServer, &server{
 		api:            api,
 		supportedLangs: supportedLangs,
@@ -165,6 +173,122 @@ func (s *server) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb.Execu
 	verdict, category := safeResultMetadata(grpcResp.Status)
 	log.Printf("sandbox event=request_finished language=%s verdict=%s category=%s exit_code=%d time_ms=%d memory_kb=%d", requestLang, verdict, category, grpcResp.ExitCode, grpcResp.TimeUsed, grpcResp.MemoryUsed)
 	return grpcResp, nil
+}
+
+const maxBatchCasesV1 = 256
+const maxBatchMessageBytesV1 = 64 << 20
+
+// ExecuteBatchV1 compiles a submission once and streams ordered case results.
+func (s *server) ExecuteBatchV1(req *pb.ExecuteBatchV1Request, stream pb.SandboxService_ExecuteBatchV1Server) error {
+	ctx := stream.Context()
+	if err := ctx.Err(); err != nil {
+		return status.FromContextError(err).Err()
+	}
+	if req == nil || len(req.Cases) == 0 {
+		return status.Error(codes.InvalidArgument, "batch cases are required")
+	}
+	if len(req.Cases) > maxBatchCasesV1 {
+		return status.Errorf(codes.InvalidArgument, "batch has %d cases; maximum is %d", len(req.Cases), maxBatchCasesV1)
+	}
+	language := req.Language
+	if language == "" {
+		language = "go"
+	}
+	if !containsLanguage(s.supportedLangs, language) {
+		log.Printf("sandbox event=request_rejected category=unsupported_language")
+		return status.Error(codes.InvalidArgument, "unsupported language")
+	}
+	seenIDs := make(map[string]struct{}, len(req.Cases))
+	batchCases := make([]sandbox.BatchCaseRequest, 0, len(req.Cases))
+	for _, testCase := range req.Cases {
+		if testCase == nil || testCase.CaseId == "" {
+			return status.Error(codes.InvalidArgument, "every batch case requires a case_id")
+		}
+		if _, duplicate := seenIDs[testCase.CaseId]; duplicate {
+			return status.Error(codes.InvalidArgument, "batch case_id values must be unique")
+		}
+		seenIDs[testCase.CaseId] = struct{}{}
+		var expected *string
+		if testCase.CompareOutput {
+			value := testCase.ExpectedOutput
+			expected = &value
+		}
+		batchCases = append(batchCases, sandbox.BatchCaseRequest{ID: testCase.CaseId, Stdin: testCase.Stdin, ExpectedOutput: expected})
+	}
+	batchAPI, ok := s.api.(sandboxBatchExecutor)
+	if !ok {
+		return status.Error(codes.Unimplemented, "batch execution is not available")
+	}
+	release, admitted := s.limiter.tryAcquire()
+	if !admitted {
+		return status.Error(codes.ResourceExhausted, "sandbox execution capacity exhausted")
+	}
+	defer release()
+
+	var timeoutValue, memoryValue *int
+	if req.Timeout > 0 {
+		value := int(req.Timeout)
+		timeoutValue = &value
+	}
+	if req.MemoryLimit > 0 {
+		value := int(req.MemoryLimit)
+		memoryValue = &value
+	}
+	var sendError error
+	response := batchAPI.ExecuteBatch(ctx, sandbox.BatchRequest{
+		SourceCode:    req.SourceCode,
+		Language:      language,
+		Timeout:       timeoutValue,
+		MemoryLimit:   memoryValue,
+		StopOnFailure: req.StopOnFailure,
+		Cases:         batchCases,
+	}, func(caseResponse sandbox.BatchCaseResponse) error {
+		event := &pb.ExecuteBatchV1Event{
+			Kind:   pb.ExecuteBatchV1Event_CASE_RESULT,
+			CaseId: caseResponse.ID,
+			Result: protoResponse(caseResponse.Response),
+		}
+		if err := stream.Send(event); err != nil {
+			sendError = err
+			return err
+		}
+		return nil
+	})
+	if sendError != nil {
+		return sendError
+	}
+	if err := ctx.Err(); err != nil {
+		return status.FromContextError(err).Err()
+	}
+	if response.Status == string(sandbox.StatusCompileError) {
+		return stream.Send(&pb.ExecuteBatchV1Event{Kind: pb.ExecuteBatchV1Event_COMPILE_ERROR, Result: protoResponse(response)})
+	}
+	if response.Status == string(sandbox.StatusSandboxError) {
+		return status.Error(codes.Internal, "sandbox batch execution failed")
+	}
+	return stream.Send(&pb.ExecuteBatchV1Event{Kind: pb.ExecuteBatchV1Event_COMPLETED})
+}
+
+func containsLanguage(supported []string, language string) bool {
+	for _, candidate := range supported {
+		if candidate == language {
+			return true
+		}
+	}
+	return false
+}
+
+func protoResponse(response sandbox.Response) *pb.ExecuteResponse {
+	return &pb.ExecuteResponse{
+		Status:       response.Status,
+		ExitCode:     int32(response.ExitCode),
+		Stdout:       response.Stdout,
+		Stderr:       response.Stderr,
+		Error:        response.Error,
+		CompileError: response.CompileError,
+		TimeUsed:     response.TimeUsed,
+		MemoryUsed:   response.MemoryUsed,
+	}
 }
 
 func safeResultMetadata(statusValue string) (verdict, category string) {

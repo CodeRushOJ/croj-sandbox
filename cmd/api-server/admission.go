@@ -81,3 +81,18 @@ func recoveryUnaryServerInterceptor(
 	}()
 	return handler(ctx, req)
 }
+
+func recoveryStreamServerInterceptor(
+	srv any,
+	stream grpc.ServerStream,
+	info *grpc.StreamServerInfo,
+	handler grpc.StreamHandler,
+) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.Printf("sandbox stream handler panic recovered method=%s", info.FullMethod)
+			err = status.Error(codes.Internal, "internal sandbox error")
+		}
+	}()
+	return handler(srv, stream)
+}

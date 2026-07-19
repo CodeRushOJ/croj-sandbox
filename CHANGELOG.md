@@ -6,6 +6,9 @@
 
 ### Added
 
+- 增加版本化 server-streaming `ExecuteBatchV1`：一个请求只编译一次，按序返回最多 256 个测试点结果并保留旧 `Execute` 兼容接口
+- 增加 batch 单次 admission、context 取消、编译产物确定性清理和 stream panic recovery
+- 增加 compile-counter、事件顺序、清理与流式 handler 回归测试
 - 增加按 Pod 限制的 `max-concurrency` admission semaphore；默认取可用并行 CPU，显式值必须大于 0
 - 满载请求返回 gRPC `ResourceExhausted` 且不进入执行器，并记录 `max_concurrency`、`in_flight`、`rejected_total`
 - 增加 handler panic recovery，以及并发上限、拒绝、slot 释放、取消和竞态测试
