@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -213,7 +214,24 @@ func (s *server) ExecuteBatchV1(req *pb.ExecuteBatchV1Request, stream pb.Sandbox
 			value := testCase.ExpectedOutput
 			expected = &value
 		}
-		batchCases = append(batchCases, sandbox.BatchCaseRequest{ID: testCase.CaseId, Stdin: testCase.Stdin, ExpectedOutput: expected})
+		var expectedTokenSHA256 *string
+		if testCase.TokenExpectedSha256 != "" {
+			if testCase.CompareOutput {
+				return status.Error(codes.InvalidArgument, "a batch case cannot request exact and token comparison")
+			}
+			decoded, err := hex.DecodeString(testCase.TokenExpectedSha256)
+			if err != nil || len(decoded) != 32 {
+				return status.Error(codes.InvalidArgument, "token_expected_sha256 must be a SHA-256 hex value")
+			}
+			value := strings.ToLower(testCase.TokenExpectedSha256)
+			expectedTokenSHA256 = &value
+		}
+		batchCases = append(batchCases, sandbox.BatchCaseRequest{
+			ID:                  testCase.CaseId,
+			Stdin:               testCase.Stdin,
+			ExpectedOutput:      expected,
+			ExpectedTokenSHA256: expectedTokenSHA256,
+		})
 	}
 	batchAPI, ok := s.api.(sandboxBatchExecutor)
 	if !ok {

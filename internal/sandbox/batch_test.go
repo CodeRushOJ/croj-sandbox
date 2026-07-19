@@ -14,6 +14,38 @@ type batchCommandExecutor struct {
 	inputs  []string
 }
 
+func TestRunBatchStopsOnTokenHashMismatchWithoutRawExpectedOutput(t *testing.T) {
+	cfg := Config{
+		HostTempDir:               t.TempDir(),
+		DefaultCompileTimeLimit:   time.Second,
+		DefaultExecuteTimeLimit:   time.Second,
+		DefaultExecuteMemoryLimit: 64 * 1024 * 1024,
+		MaxStdoutSize:             1024,
+		MaxStderrSize:             1024,
+		Languages: map[string]LanguageConfig{"test": {
+			Compile: CompileConfig{SrcName: "main.src"},
+			Run:     RunConfig{Command: "test-runner"},
+		}},
+	}
+	executor := &batchCommandExecutor{results: []Result{{Status: StatusAccepted, Stdout: "wrong"}, {Status: StatusAccepted, Stdout: "two"}}}
+	runner := &Runner{cfg: cfg, executor: executor}
+	input := "hidden"
+	hashHex := "615f69ed4e249a34955fc08be20fc324c06462f6ae8b817d22280505adca9209"
+	emitted := 0
+
+	result := runner.RunBatchWithConfig(context.Background(), "test", "source", []BatchCase{
+		{ID: "case-1", Stdin: &input, ExpectedTokenSHA256: &hashHex},
+		{ID: "case-2", Stdin: &input, ExpectedTokenSHA256: &hashHex},
+	}, true, cfg, func(BatchCaseResult) error {
+		emitted++
+		return nil
+	})
+
+	if result.Status != StatusWrongAnswer || emitted != 1 || len(executor.inputs) != 1 {
+		t.Fatalf("result=%+v emitted=%d executions=%d", result, emitted, len(executor.inputs))
+	}
+}
+
 func (executor *batchCommandExecutor) Execute(_ context.Context, _ []string, _ map[string]string, input *string) Result {
 	if input != nil {
 		executor.inputs = append(executor.inputs, *input)
@@ -112,5 +144,41 @@ func TestRunBatchStopsAfterFirstContestantFailure(t *testing.T) {
 	entries, err := os.ReadDir(tempRoot)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("request artifacts were not cleaned: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestRunBatchBoundsCompileDiagnostics(t *testing.T) {
+	cfg := Config{
+		HostTempDir:               t.TempDir(),
+		DefaultCompileTimeLimit:   time.Second,
+		DefaultExecuteTimeLimit:   time.Second,
+		DefaultExecuteMemoryLimit: 64 * 1024 * 1024,
+		MaxStdoutSize:             32,
+		MaxStderrSize:             32,
+		Languages: map[string]LanguageConfig{"test": {
+			Compile: CompileConfig{
+				SrcName:        "main.src",
+				ExeName:        "main.bin",
+				CompileCommand: "yes stdout | head -c 1024; yes stderr | head -c 1024 >&2; exit 1",
+			},
+			Run: RunConfig{Command: "{{EXE_PATH}}"},
+		}},
+	}
+	runner := &Runner{cfg: cfg, executor: &batchCommandExecutor{}}
+	input := "input"
+
+	result := runner.RunBatchWithConfig(context.Background(), "test", "source", []BatchCase{{ID: "case-1", Stdin: &input}}, true, cfg, func(BatchCaseResult) error {
+		t.Fatal("compile failure emitted a case result")
+		return nil
+	})
+
+	if result.Status != StatusCompileError {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(result.CompileOutput) > 64 {
+		t.Fatalf("compile diagnostics bytes = %d, want <= 64", len(result.CompileOutput))
+	}
+	if result.Error != ErrCompileFailed.Error() {
+		t.Fatalf("compile error duplicated diagnostics: %q", result.Error)
 	}
 }

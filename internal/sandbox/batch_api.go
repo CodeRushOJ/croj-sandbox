@@ -6,9 +6,10 @@ import (
 )
 
 type BatchCaseRequest struct {
-	ID             string
-	Stdin          string
-	ExpectedOutput *string
+	ID                  string
+	Stdin               string
+	ExpectedOutput      *string
+	ExpectedTokenSHA256 *string
 }
 
 type BatchRequest struct {
@@ -65,7 +66,12 @@ func (api *SandboxAPI) ExecuteBatch(
 	cases := make([]BatchCase, 0, len(request.Cases))
 	for _, testCase := range request.Cases {
 		input := testCase.Stdin
-		cases = append(cases, BatchCase{ID: testCase.ID, Stdin: &input, ExpectedOutput: testCase.ExpectedOutput})
+		cases = append(cases, BatchCase{
+			ID:                  testCase.ID,
+			Stdin:               &input,
+			ExpectedOutput:      testCase.ExpectedOutput,
+			ExpectedTokenSHA256: testCase.ExpectedTokenSHA256,
+		})
 	}
 	result := api.runner.RunBatchWithConfig(
 		batchContext,

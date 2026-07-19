@@ -56,9 +56,11 @@ service SandboxService {
 
 `ExecuteRequest` 可携带语言、源码、标准输入、超时、内存限制和预期输出；响应包含状态、退出码、stdout、stderr、编译错误、耗时和内存用量。未提供语言时默认使用 Go。
 
-`ExecuteBatchV1` 保留同一份源码和编译产物，在一个 admission slot 内按请求顺序启动独立 case 进程。每个进程仍独立应用执行超时、内存、cgroup/seccomp 与输出上限；`stop_on_failure=true` 时首个非 Accepted 结果后停止。事件只允许 `CASE_RESULT`、`COMPILE_ERROR` 和最终 `COMPLETED`。请求必须包含 1..256 个唯一非空 `case_id`，protobuf 编码后不得超过 64 MiB；judging-server 会在 RPC 前做同样的确定性检查。旧 `Execute` 不变，旧客户端可继续使用；judging-server 批量客户端必须和本版本同时发布。
+`ExecuteBatchV1` 保留同一份源码和编译产物，在一个 admission slot 内按请求顺序启动独立 case 进程。每个进程仍独立应用执行超时、内存、cgroup/seccomp 与输出上限；`stop_on_failure=true` 时首个非 Accepted 结果后停止。exact 使用 `expected_output`，token 使用规范化 token 序列的 `token_expected_sha256`，因此 token 原始隐藏答案不跨入 sandbox，但 sandbox 仍能在首个 token WA 时早停。事件只允许 `CASE_RESULT`、`COMPILE_ERROR` 和最终 `COMPLETED`。请求必须包含 1..256 个唯一非空 `case_id`，protobuf 编码后不得超过 64 MiB；judging-server 会在 RPC 前做同样的确定性检查。旧 `Execute` 不变，旧客户端可继续使用；judging-server 批量客户端必须和本版本同时发布。
 
 编译产物仅在单个 RPC 的私有临时目录中存在，不跨提交缓存。RPC 正常结束、编译失败、发送失败和 context 取消都清理源码及产物。整个 batch 只占一个 `max-concurrency` slot，满载仍在编译前返回 `ResourceExhausted`。
+
+编译 stdout/stderr 分别受现有 64 KiB 上限约束，失败响应只在 `compile_error` 携带一次有界诊断；错误分类字段不复制诊断，避免恶意编译输出放大内存和 gRPC 响应。
 
 默认监听 `0.0.0.0:50051`。标准健康服务名为空字符串。服务启动时先保持 `NOT_SERVING`；只有五语言工具链、临时目录写入和 cgroup 控制器自检全部通过后才切换为 `SERVING`，优雅退出前恢复 `NOT_SERVING`。因此 Kubernetes readiness 和 EndpointSlice 可调度状态与实际执行依赖保持一致。
 

@@ -27,6 +27,8 @@
 
 ### Fixed
 
+- 限制 batch 编译诊断内存并去除 `error`/`compile_error` 重复载荷，避免大输出触发 OOM 或错误重试
+- token checker 改用规范化 token 序列 SHA-256 在 sandbox 内判定，原始 expected 不跨服务边界且恢复首错早停
 - 修复 cgroup v2 清理被误判为 v1 的问题
 - 修复不同 Pod 内相同 namespace PID 可能复用主机 cgroup 的问题
 - 修复最终镜像缺少 Go 编译器和 `javac` 的问题

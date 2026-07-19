@@ -6,7 +6,7 @@ Add a versioned sandbox RPC that compiles one submission once and runs an ordere
 
 ## Contract
 
-`SandboxService.ExecuteBatchV1` is a server-streaming RPC. Its request carries language, source, immutable limits, `stop_on_failure`, and ordered cases containing an opaque case ID, stdin, expected output and an explicit comparison flag. The server emits exactly one compile-error event, or one result event per completed case followed by a completion event. The method name is versioned so incompatible future protocol changes do not silently alter judging.
+`SandboxService.ExecuteBatchV1` is a server-streaming RPC. Its request carries language, source, immutable limits, `stop_on_failure`, and ordered cases containing an opaque case ID, stdin, exact expected output or a token-expected SHA-256. Token hashes cover a length-prefixed canonical token sequence, so raw token answers stay in judging while sandbox can still stop on the first mismatch. The server emits exactly one compile-error event, or one result event per completed case followed by a completion event. The method name is versioned so incompatible future protocol changes do not silently alter judging.
 
 The legacy `Execute` RPC and messages remain unchanged. A batch is rejected with `InvalidArgument` when empty, over 256 cases, or contains duplicate/empty case IDs. The existing Pod admission semaphore accounts for a whole batch as one execution slot and returns `ResourceExhausted` before compiling when full.
 

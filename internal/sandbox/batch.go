@@ -3,6 +3,9 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -10,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/CodeRushOJ/croj-sandbox/internal/util"
@@ -17,9 +21,10 @@ import (
 
 // BatchCase is one ordered execution against a request-local compiled artifact.
 type BatchCase struct {
-	ID             string
-	Stdin          *string
-	ExpectedOutput *string
+	ID                  string
+	Stdin               *string
+	ExpectedOutput      *string
+	ExpectedTokenSHA256 *string
 }
 
 // BatchCaseResult associates a sandbox result with its opaque caller-provided ID.
@@ -103,6 +108,10 @@ func (r *Runner) RunBatchWithConfig(
 			caseResult.Status = StatusWrongAnswer
 			caseResult.Error = ErrOutputMismatch.Error()
 		}
+		if caseResult.Status == StatusAccepted && testCase.ExpectedTokenSHA256 != nil && tokenOutputSHA256(caseResult.Stdout) != *testCase.ExpectedTokenSHA256 {
+			caseResult.Status = StatusWrongAnswer
+			caseResult.Error = ErrOutputMismatch.Error()
+		}
 		log.Printf(
 			"sandbox event=batch_case_finished language=%s case_index=%d verdict=%s exit_code=%d time_ms=%d memory_kb=%d",
 			language,
@@ -121,6 +130,17 @@ func (r *Runner) RunBatchWithConfig(
 		}
 	}
 	return last
+}
+
+func tokenOutputSHA256(output string) string {
+	hasher := sha256.New()
+	var length [8]byte
+	for _, token := range strings.Fields(output) {
+		binary.BigEndian.PutUint64(length[:], uint64(len(token)))
+		_, _ = hasher.Write(length[:])
+		_, _ = hasher.Write([]byte(token))
+	}
+	return hex.EncodeToString(hasher.Sum(nil))
 }
 
 func compileBatchArtifact(
@@ -159,8 +179,15 @@ func compileBatchArtifact(
 	command := exec.CommandContext(compileCtx, "sh", "-c", compileCommand)
 	command.Dir = hostRunDir
 	var stdout, stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
+	stdoutLimit, stderrLimit := cfg.MaxStdoutSize, cfg.MaxStderrSize
+	if stdoutLimit <= 0 {
+		stdoutLimit = int64(DefaultMaxStdoutKB) * 1024
+	}
+	if stderrLimit <= 0 {
+		stderrLimit = int64(DefaultMaxStderrKB) * 1024
+	}
+	command.Stdout = NewLimitedWriter(&stdout, stdoutLimit)
+	command.Stderr = NewLimitedWriter(&stderr, stderrLimit)
 	started := time.Now()
 	log.Printf("sandbox event=batch_compile_started language=%s", language)
 	err := command.Run()
@@ -172,9 +199,7 @@ func compileBatchArtifact(
 			return "", compileOutput, NewResult(StatusCompileError, fmt.Errorf("%w (limit: %v)", ErrCompileTimeout, compileTimeout))
 		}
 		log.Printf("sandbox event=batch_compile_finished language=%s category=compile_failed duration_ms=%d diagnostic_bytes=%d", language, durationMillis, len(compileOutput))
-		result := NewResult(StatusCompileError, fmt.Errorf("%w", ErrCompileFailed))
-		result.Error = compileOutput
-		return "", compileOutput, result
+		return "", compileOutput, NewResult(StatusCompileError, ErrCompileFailed)
 	}
 	if _, err := os.Stat(compiledPath); err != nil {
 		log.Printf("sandbox event=batch_compile_finished language=%s category=binary_missing duration_ms=%d diagnostic_bytes=%d", language, durationMillis, len(compileOutput))
