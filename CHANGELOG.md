@@ -31,7 +31,7 @@
 - 删除 ZooKeeper 注册与客户端发现，调度统一交给 Kubernetes EndpointSlice
 - cgroup v2 在父级正确委派 memory/cpu/pids controller，并按 Pod UID 隔离 cgroup 名称
 - Go 构建与运行工具链升级至 1.26.5，Java 镜像从 JRE 改为 JDK 17
-- gRPC 升级至 1.79.3、`x/net` 升级至 0.55.0，修复 GitHub Dependabot 报告的 1 个 Critical 与 3 个 Medium 漏洞
+- gRPC 升级至 1.82.1、`x/net` 升级至 0.55.0，修复 GitHub Dependabot 与镜像扫描报告的 Critical/High/Medium 漏洞
 - sandbox 日志改为稳定的 `event`/`category` 与有界指标；verbose CLI 日志只显示响应字段长度和执行元数据
 - 编译器与用户程序统一通过 fail-closed 执行器；cgroup、launcher 或 seccomp 不可用时不再降级执行
 - 请求 cgroup 固定创建在 worker Pod 自身 cgroup 下，并要求统一 cgroup v2
