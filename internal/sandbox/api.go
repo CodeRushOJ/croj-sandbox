@@ -48,7 +48,7 @@ func NewSandboxAPIWithConfig(cfg Config) (*SandboxAPI, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize sandbox runner: %w", err)
 	}
-	
+
 	return &SandboxAPI{
 		runner: runner,
 		cfg:    cfg,
@@ -57,16 +57,20 @@ func NewSandboxAPIWithConfig(cfg Config) (*SandboxAPI, error) {
 
 // Execute runs the provided code and returns the result
 func (api *SandboxAPI) Execute(req Request) Response {
+	return api.ExecuteContext(context.Background(), req)
+}
+
+// ExecuteContext runs the provided code and propagates caller cancellation and deadlines.
+func (api *SandboxAPI) ExecuteContext(parent context.Context, req Request) Response {
 	// Set default language if not specified
 	language := req.Language
 	if language == "" {
 		language = "go" // 默认使用Go语言
 	}
-	
+
 	// Apply custom timeout if provided
-	ctx := context.Background()
 	var execTimeout time.Duration
-	
+
 	// 检查语言配置是否存在
 	if langConfig, ok := api.cfg.Languages[language]; ok {
 		execTimeout = langConfig.GetExecuteTimeout(api.cfg.DefaultExecuteTimeLimit)
@@ -74,7 +78,7 @@ func (api *SandboxAPI) Execute(req Request) Response {
 		// 回退到兼容字段
 		execTimeout = api.cfg.ExecTimeout
 	}
-	
+
 	// 应用自定义超时（如果提供）
 	var userSpecifiedTimeout bool = false
 	if req.Timeout != nil && *req.Timeout > 0 {
@@ -86,7 +90,7 @@ func (api *SandboxAPI) Execute(req Request) Response {
 			log.Printf("API: 使用用户指定的超时: %.2f秒", execTimeout.Seconds())
 		}
 	}
-	
+
 	// 应用自定义内存限制（如果提供）
 	memoryLimit := api.cfg.DefaultExecuteMemoryLimit
 	if req.MemoryLimit != nil && *req.MemoryLimit > 0 {
@@ -103,31 +107,31 @@ func (api *SandboxAPI) Execute(req Request) Response {
 
 	// 创建新的配置副本，而不是修改原始配置
 	customCfg := Config{
-		Languages:               api.cfg.Languages,
-		HostTempDir:             api.cfg.HostTempDir,
-		DefaultCompileTimeLimit: api.cfg.DefaultCompileTimeLimit,
-		DefaultExecuteTimeLimit: execTimeout, // 使用自定义超时
+		Languages:                 api.cfg.Languages,
+		HostTempDir:               api.cfg.HostTempDir,
+		DefaultCompileTimeLimit:   api.cfg.DefaultCompileTimeLimit,
+		DefaultExecuteTimeLimit:   execTimeout, // 使用自定义超时
 		DefaultExecuteMemoryLimit: memoryLimit, // 使用自定义内存限制
-		CompileTimeout:          api.cfg.CompileTimeout,
-		ExecTimeout:             execTimeout, // 兼容性字段也更新
-		MaxStdoutSize:           api.cfg.MaxStdoutSize,
-		MaxStderrSize:           api.cfg.MaxStderrSize,
-		UserSpecifiedTimeout:    userSpecifiedTimeout, // 添加新字段标记用户是否指定了超时
+		CompileTimeout:            api.cfg.CompileTimeout,
+		ExecTimeout:               execTimeout, // 兼容性字段也更新
+		MaxStdoutSize:             api.cfg.MaxStdoutSize,
+		MaxStderrSize:             api.cfg.MaxStderrSize,
+		UserSpecifiedTimeout:      userSpecifiedTimeout, // 添加新字段标记用户是否指定了超时
 	}
-	
+
 	// Create context with timeout (估计编译时间+执行时间+额外缓冲)
 	compileTimeout := api.cfg.DefaultCompileTimeLimit
 	if api.cfg.CompileTimeout > 0 {
 		compileTimeout = api.cfg.CompileTimeout
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), compileTimeout+execTimeout+5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, compileTimeout+execTimeout+5*time.Second)
 	defer cancel()
-	
+
 	// 运行代码（使用修改后的配置）
-	log.Printf("API: 调用RunWithConfig，用户指定超时: %v, 超时设置为: %.2f秒", 
+	log.Printf("API: 调用RunWithConfig，用户指定超时: %v, 超时设置为: %.2f秒",
 		customCfg.UserSpecifiedTimeout, customCfg.DefaultExecuteTimeLimit.Seconds())
 	result := api.runner.RunWithConfig(ctx, language, req.SourceCode, req.Stdin, req.ExpectedOutput, customCfg)
-	
+
 	// 转换为API响应
 	response := Response{
 		Status:       string(result.Status),
@@ -139,7 +143,7 @@ func (api *SandboxAPI) Execute(req Request) Response {
 		MemoryUsed:   result.MemoryUsedKB,
 		CompileError: result.CompileOutput,
 	}
-	
+
 	return response
 }
 
@@ -149,14 +153,14 @@ func (api *SandboxAPI) ExecuteJSON(jsonRequest string) (string, error) {
 	if err := json.Unmarshal([]byte(jsonRequest), &req); err != nil {
 		return "", fmt.Errorf("failed to parse request JSON: %w", err)
 	}
-	
+
 	response := api.Execute(req)
-	
+
 	jsonResponse, err := json.Marshal(response)
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize response: %w", err)
 	}
-	
+
 	return string(jsonResponse), nil
 }
 

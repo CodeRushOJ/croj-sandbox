@@ -54,11 +54,15 @@ service SandboxService {
 }
 ```
 
-`ExecuteRequest` 可携带语言、源码、标准输入、超时、内存限制和预期输出；响应包含状态、退出码、stdout、stderr、编译错误、耗时和内存用量。未提供语言时默认使用 Go。
+`ExecuteRequest` 可携带语言、源码、标准输入、超时、内存限制和预期输出；响应包含状态、退出码、stdout、stderr、编译错误、耗时和内存用量。未提供语言时默认使用 Go。unary protobuf 序列化体积上限为 4 MiB，服务端在 protobuf unmarshal 前按目标消息类型拒绝更大请求；源码、stdin、expected output 还分别有 4 MiB 字节上限。超过这些资源上限返回 gRPC `ResourceExhausted`，且不会调用执行器。
 
-`ExecuteBatchV1` 保留同一份源码和编译产物，在一个 admission slot 内按请求顺序启动独立 case 进程。每个进程仍独立应用执行超时、内存、cgroup/seccomp 与输出上限；`stop_on_failure=true` 时首个非 Accepted 结果后停止。exact 使用 `expected_output`，token 使用规范化 token 序列的 `token_expected_sha256`，因此 token 原始隐藏答案不跨入 sandbox，但 sandbox 仍能在首个 token WA 时早停。事件只允许 `CASE_RESULT`、`COMPILE_ERROR` 和最终 `COMPLETED`。请求必须包含 1..256 个唯一非空 `case_id`，protobuf 编码后不得超过 64 MiB；judging-server 会在 RPC 前做同样的确定性检查。旧 `Execute` 不变，旧客户端可继续使用；judging-server 批量客户端必须和本版本同时发布。
+`ExecuteBatchV1` 保留同一份源码和编译产物，在一个 admission slot 内按请求顺序启动独立 case 进程。每个进程仍独立应用执行超时、内存、cgroup/seccomp 与输出上限；`stop_on_failure=true` 时首个非 Accepted 结果后停止。exact 使用 `expected_output`，token 使用规范化 token 序列的 `token_expected_sha256`，因此 token 原始隐藏答案不跨入 sandbox，但 sandbox 仍能在首个 token WA 时早停。事件只允许 `CASE_RESULT`、`COMPILE_ERROR` 和最终 `COMPLETED`。
+
+Batch V1 保留 64 MiB protobuf 接收上限，并额外限制聚合 payload（源码、全部 case ID、stdin、expected output 和 token digest）不超过 64 MiB。请求必须包含 1..256 个唯一非空 `case_id`；每个 `case_id` 不超过 256 字节，源码、每个 stdin 和每个 expected output 分别不超过 4 MiB。超出字节数或 case 数返回 `ResourceExhausted`；空/重复 ID、无效 token digest 等格式错误返回 `InvalidArgument`。judging-server 会在 RPC 前做同样的确定性检查。旧 `Execute` 不变，旧客户端可继续使用；judging-server 批量客户端必须和本版本同时发布。
 
 编译产物仅在单个 RPC 的私有临时目录中存在，不跨提交缓存。RPC 正常结束、编译失败、发送失败和 context 取消都清理源码及产物。整个 batch 只占一个 `max-concurrency` slot，满载仍在编译前返回 `ResourceExhausted`。
+
+Batch 总墙钟预算按“编译预算 + case 数 × 单 case 执行预算 + 5 秒”计算，但硬性夹到最多 5 分钟，避免 256 个 case 把单个 RPC 延长到数小时。客户端取消和 deadline 通过 `SandboxAPI.ExecuteContext` 贯穿编译、执行与 batch 生命周期；旧的进程内 `Execute` 方法仅作为 background-context 兼容包装。
 
 编译 stdout/stderr 分别受现有 64 KiB 上限约束，失败响应只在 `compile_error` 携带一次有界诊断；错误分类字段不复制诊断，避免恶意编译输出放大内存和 gRPC 响应。
 
@@ -84,6 +88,8 @@ API Server 使用命令行参数：
 
 - 未达到 `max-concurrency` 时立即进入 `SandboxAPI.Execute`；
 - slot 已满时立即返回 gRPC `codes.ResourceExhausted`，不会调用编译或执行链路；
+- Batch V1 的 slot 在 stream interceptor 中、generated handler 首次 `RecvMsg` 之前获取；满载时不会读取或反序列化最多 64 MiB 的 batch payload；
+- health 和 reflection RPC 不属于执行方法，即使所有执行 slot 已满也不会占用或等待 slot；
 - slot 绑定真实执行生命周期，通过 `defer` 在正常返回和 panic 展开时释放；
 - unary recovery interceptor 把 handler panic 转换为 `codes.Internal`，避免单个请求终止服务进程；
 - 已取消的 context 在进入执行器前返回 `codes.Canceled`。
@@ -92,7 +98,7 @@ API Server 使用命令行参数：
 
 默认值取 Go 运行时当前可用并行 CPU。Kubernetes 部署应结合容器 CPU limit 显式设置，例如 2 CPU limit 使用 `-max-concurrency=2`；编译器内存峰值较大时应进一步降低，而不是只扩大队列。
 
-收到终止信号后，服务先把 health 改为 `NOT_SERVING`，`grpc.GracefulStop` 停止接受新 RPC 并等待已 admission 的执行完成；对应特征测试会验证这两个条件。当前 drain 尚无独立 deadline，过长执行可能超过 Kubernetes termination grace 后被 SIGKILL；有界 drain、执行 context 传播和强制清理由 [Issue #7](https://github.com/CodeRushOJ/croj-sandbox/issues/7) 跟踪。
+收到终止信号后，服务先把 health 改为 `NOT_SERVING`，再调用 `grpc.GracefulStop` 停止接受新 RPC 并等待已 admission 的执行完成。drain 最多等待 25 秒，随后调用 `grpc.Stop` 强制终止仍未完成的 RPC；这为 Pod 的 30 秒 `terminationGracePeriodSeconds` 预留 5 秒进程/容器清理余量。对应单元测试用可控 context 验证顺序、优雅完成与超时强停，不依赖 sleep 时序。
 
 ### 评测数据与日志
 
@@ -186,7 +192,7 @@ spec:
 
 `deploy/deployment.yaml` 使用 `coderushoj/croj-sandbox:dev`，只面向本机 Kind；正式镜像版本和生产级工作负载仍需在 `croj-platform` Helm chart 中完成安全加固后发布。`croj-judging-server` 只需要 EndpointSlice 的 `list` 权限，不需要访问 Pod 或 Kubernetes Endpoints API。
 
-平台 Helm follow-up：在 `sandbox.args` 的 nsenter 分隔符和 `/app/api-server` 之后追加 `-max-concurrency=N`，并让 `N` 与 sandbox Pod 的 CPU/内存 limit、语言工具链峰值和期望并行度一致。参数缺失时使用运行时 CPU 默认值；`0` 或负数会使 API Server 启动失败，避免无界或含糊配置。
+平台 Helm follow-up：在 `sandbox.args` 的 nsenter 分隔符和 `/app/api-server` 之后追加 `-max-concurrency=N`，并让 `N` 与 sandbox Pod 的 CPU/内存 limit、语言工具链峰值和期望并行度一致。参数缺失时使用运行时 CPU 默认值；`0` 或负数会使 API Server 启动失败，避免无界或含糊配置。Pod termination grace 不应低于 30 秒：服务内固定使用其中最多 25 秒 drain，剩余时间留给 kubelet 和容器运行时完成退出。
 
 ## 安全边界
 

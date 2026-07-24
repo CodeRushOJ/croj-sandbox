@@ -12,6 +12,11 @@
 - 增加按 Pod 限制的 `max-concurrency` admission semaphore；默认取可用并行 CPU，显式值必须大于 0
 - 满载请求返回 gRPC `ResourceExhausted` 且不进入执行器，并记录 `max_concurrency`、`in_flight`、`rejected_total`
 - 增加 handler panic recovery，以及并发上限、拒绝、slot 释放、取消和竞态测试
+- 增加 message-type aware protobuf codec：unary `ExecuteRequest` 在 unmarshal 前限制为 4 MiB，Batch V1 保留 64 MiB
+- 增加源码、stdin、expected output、case ID、case 数和 batch 聚合 payload 的明确字节/数量上限
+- 增加 `SandboxAPI.ExecuteContext`，gRPC 取消和 deadline 贯穿编译/执行，旧 `Execute` 保留兼容包装
+- 增加 5 分钟 Batch V1 总墙钟硬上限
+- 增加 25 秒有界关闭：先发布 `NOT_SERVING`，超时后从 `GracefulStop` 切换到强制 `Stop`
 - Kubernetes 原生 `Service`/EndpointSlice 发现契约和 `grpc:50051` 命名端口
 - 标准 gRPC health/reflection，以及工具链、临时目录和真实 cgroup 迁移启动自检
 - 双副本 Kind 开发清单、原生 gRPC probes、CI、竞态测试和 cgroup 集成测试
@@ -20,6 +25,7 @@
 ### Changed
 
 - Kind 开发 Deployment 按 2 CPU limit 显式设置 `-max-concurrency=2`
+- Batch V1 admission 移到 stream interceptor，在 generated handler `RecvMsg` 前拒绝满载请求；health/reflection 不占执行 slot
 - 删除 ZooKeeper 注册与客户端发现，调度统一交给 Kubernetes EndpointSlice
 - cgroup v2 在父级正确委派 memory/cpu/pids controller，并按 Pod UID 隔离 cgroup 名称
 - Go 构建与运行工具链升级至 1.24.6，Java 镜像从 JRE 改为 JDK 17

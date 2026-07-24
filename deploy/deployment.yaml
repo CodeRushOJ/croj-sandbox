@@ -25,6 +25,7 @@ spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
       hostPID: true
+      # The server drains for at most 25s, leaving 5s for kubelet/runtime cleanup.
       terminationGracePeriodSeconds: 30
       nodeSelector:
         coderushoj.dev/sandbox: "true"
