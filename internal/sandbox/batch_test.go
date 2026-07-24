@@ -51,6 +51,7 @@ func TestRunBatchPreservesRequestedPerCaseMemoryLimit(t *testing.T) {
 		{requestedMiB: 64, wantBytes: 64 << 20},
 		{requestedMiB: 1024, wantBytes: 1 << 30},
 		{requestedMiB: 2048, wantBytes: 1 << 30},
+		{requestedMiB: int(^uint(0) >> 1), wantBytes: 1 << 30},
 	}
 	for _, test := range tests {
 		t.Run(fmt.Sprintf("%dMiB", test.requestedMiB), func(t *testing.T) {
@@ -90,6 +91,69 @@ func TestRunBatchPreservesRequestedPerCaseMemoryLimit(t *testing.T) {
 				t.Fatalf("run command = %s, want %s", got, want)
 			}
 		})
+	}
+}
+
+func TestExecuteContextClampsOverflowingMemoryLimitBeforeConversion(t *testing.T) {
+	cfg := testMemoryLimitConfig(t)
+	executor := &commandCapturingExecutor{}
+	api := &SandboxAPI{
+		runner: &Runner{cfg: cfg, executor: executor},
+		cfg:    cfg,
+	}
+	requestedMiB := int(^uint(0) >> 1)
+
+	response := api.ExecuteContext(context.Background(), Request{
+		Language:    "test",
+		SourceCode:  "source",
+		MemoryLimit: &requestedMiB,
+	})
+
+	if response.Status != string(StatusAccepted) {
+		t.Fatalf("ExecuteContext response = %+v", response)
+	}
+	if got, want := fmt.Sprint(executor.command), "[test-runner --memory-kb 1048576]"; got != want {
+		t.Fatalf("ExecuteContext command = %s, want %s", got, want)
+	}
+}
+
+func TestExecuteJSONClampsOverflowingMemoryLimitBeforeConversion(t *testing.T) {
+	cfg := testMemoryLimitConfig(t)
+	executor := &commandCapturingExecutor{}
+	api := &SandboxAPI{
+		runner: &Runner{cfg: cfg, executor: executor},
+		cfg:    cfg,
+	}
+	request := fmt.Sprintf(
+		`{"language":"test","sourceCode":"source","memoryLimit":%d}`,
+		int(^uint(0)>>1),
+	)
+
+	responseJSON, err := api.ExecuteJSON(request)
+	if err != nil {
+		t.Fatalf("ExecuteJSON: %v", err)
+	}
+	if got, want := fmt.Sprint(executor.command), "[test-runner --memory-kb 1048576]"; got != want {
+		t.Fatalf("ExecuteJSON command = %s, want %s (response=%s)", got, want, responseJSON)
+	}
+}
+
+func testMemoryLimitConfig(t *testing.T) Config {
+	t.Helper()
+	return Config{
+		HostTempDir:               t.TempDir(),
+		DefaultCompileTimeLimit:   time.Second,
+		DefaultExecuteTimeLimit:   time.Second,
+		DefaultExecuteMemoryLimit: int64(DefaultMemoryLimitMB) << 20,
+		MaxStdoutSize:             1024,
+		MaxStderrSize:             1024,
+		Languages: map[string]LanguageConfig{"test": {
+			Compile: CompileConfig{SrcName: "main.src"},
+			Run: RunConfig{
+				Command:  "test-runner --memory-kb {{MAX_MEM}}",
+				MemoryMB: DefaultMemoryLimitMB,
+			},
+		}},
 	}
 }
 
@@ -245,6 +309,35 @@ func TestRunBatchStopsAfterFirstContestantFailure(t *testing.T) {
 	entries, err := os.ReadDir(tempRoot)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("request artifacts were not cleaned: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestRunBatchAlwaysStopsAfterSandboxFailure(t *testing.T) {
+	cfg := testMemoryLimitConfig(t)
+	executor := &batchCommandExecutor{results: []Result{
+		{Status: StatusSandboxError, Error: "cgroup cleanup failed"},
+		{Status: StatusAccepted},
+	}}
+	runner := &Runner{cfg: cfg, executor: executor}
+	input := "hidden"
+	emitted := make([]BatchCaseResult, 0, 2)
+
+	result := runner.RunBatchWithConfig(context.Background(), "test", "source", []BatchCase{
+		{ID: "case-1", Stdin: &input},
+		{ID: "case-2", Stdin: &input},
+	}, false, cfg, func(caseResult BatchCaseResult) error {
+		emitted = append(emitted, caseResult)
+		return nil
+	})
+
+	if result.Status != StatusSandboxError {
+		t.Fatalf("batch result = %+v, want SandboxError", result)
+	}
+	if len(executor.inputs) != 1 {
+		t.Fatalf("executions = %d, want 1", len(executor.inputs))
+	}
+	if len(emitted) != 1 || emitted[0].ID != "case-1" {
+		t.Fatalf("emitted = %+v, want only case-1", emitted)
 	}
 }
 

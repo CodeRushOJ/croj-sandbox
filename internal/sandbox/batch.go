@@ -132,7 +132,8 @@ func (r *Runner) RunBatchWithConfig(
 			return NewResult(StatusSandboxError, fmt.Errorf("emit batch case result: %w", err))
 		}
 		last = caseResult
-		if stopOnFailure && caseResult.Status != StatusAccepted {
+		if caseResult.Status == StatusSandboxError ||
+			stopOnFailure && caseResult.Status != StatusAccepted {
 			return last
 		}
 	}

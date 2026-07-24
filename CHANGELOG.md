@@ -38,6 +38,8 @@
 
 ### Fixed
 
+- Batch 遇到任意 `SandboxError` 都会无条件停止，不再因 `stopOnFailure=false` 继续执行后续 case 或错误发送 `COMPLETED`
+- JSON、进程内和 Batch 兼容 API 在 MiB 域先限制到 1 GiB 再换算字节，超大正整数不能通过溢出关闭 `memory.max`
 - 退出和取消路径使用 `cgroup.kill` 清理整个请求进程树，等待 `populated=0` 后删除 cgroup，避免父进程退出后 daemon 子进程逃逸
 - seccomp 拒绝 `io_uring_setup/register/enter`，阻断 `IORING_OP_SOCKET` 绕过禁网策略
 - unary/batch 外层 deadline 改用语言编译预算并受 5 分钟服务端上限约束，Go 240 秒冷编译不再被 30/90 秒提前截断

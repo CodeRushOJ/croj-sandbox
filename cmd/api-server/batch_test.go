@@ -6,11 +6,14 @@ import (
 
 	"github.com/CodeRushOJ/croj-sandbox/internal/sandbox"
 	pb "github.com/CodeRushOJ/croj-sandbox/proto"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 type batchAPIStub struct {
-	requests []sandbox.BatchRequest
+	requests      []sandbox.BatchRequest
+	finalResponse *sandbox.Response
 }
 
 func TestExecuteBatchV1DoesNotAcquireSecondAdmissionSlot(t *testing.T) {
@@ -48,6 +51,9 @@ func (api *batchAPIStub) ExecuteBatch(ctx context.Context, request sandbox.Batch
 		}); err != nil {
 			return sandbox.Response{Status: string(sandbox.StatusSandboxError), Error: err.Error()}
 		}
+	}
+	if api.finalResponse != nil {
+		return *api.finalResponse
 	}
 	return sandbox.Response{Status: string(sandbox.StatusAccepted)}
 }
@@ -105,5 +111,32 @@ func TestExecuteBatchV1StreamsOrderedResultsAndCompletion(t *testing.T) {
 	}
 	if stream.events[2].Kind != pb.ExecuteBatchV1Event_COMPLETED {
 		t.Fatalf("completion event = %+v", stream.events[2])
+	}
+}
+
+func TestExecuteBatchV1DoesNotCompleteAfterSandboxFailure(t *testing.T) {
+	api := &batchAPIStub{
+		finalResponse: &sandbox.Response{
+			Status: string(sandbox.StatusSandboxError),
+			Error:  "cgroup cleanup failed",
+		},
+	}
+	limiter, err := newExecutionLimiter(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &server{api: api, supportedLangs: []string{"go"}, limiter: limiter}
+	stream := &batchEventStream{ctx: context.Background()}
+
+	err = service.ExecuteBatchV1(&pb.ExecuteBatchV1Request{
+		Language: "go",
+		Cases:    []*pb.ExecuteBatchV1Case{{CaseId: "case-1"}},
+	}, stream)
+
+	if status.Code(err) != codes.Internal {
+		t.Fatalf("ExecuteBatchV1 code = %s, want Internal", status.Code(err))
+	}
+	if len(stream.events) != 1 || stream.events[0].Kind != pb.ExecuteBatchV1Event_CASE_RESULT {
+		t.Fatalf("events = %+v, want one case result and no COMPLETED", stream.events)
 	}
 }

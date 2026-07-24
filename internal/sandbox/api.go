@@ -97,14 +97,10 @@ func (api *SandboxAPI) ExecuteContext(parent context.Context, req Request) Respo
 	}
 
 	// 应用自定义内存限制（如果提供）
-	memoryLimit := api.cfg.DefaultExecuteMemoryLimit
-	userSpecifiedMemoryLimit := false
-	if req.MemoryLimit != nil && *req.MemoryLimit > 0 {
-		// 转换 MB 到 bytes
-		customMemLimit := int64(*req.MemoryLimit) * 1024 * 1024
-		memoryLimit = min(customMemLimit, maxRequestMemoryLimitBytes)
-		userSpecifiedMemoryLimit = true
-	}
+	memoryLimit, userSpecifiedMemoryLimit := requestMemoryLimitBytes(
+		api.cfg.DefaultExecuteMemoryLimit,
+		req.MemoryLimit,
+	)
 
 	// 创建新的配置副本，而不是修改原始配置。复制完整配置可以保留
 	// fail-closed launcher、cgroup 和后续新增的安全字段。
@@ -154,6 +150,15 @@ func compileTimeLimit(cfg Config, language string) time.Duration {
 
 func requestWallClockLimit(compileTimeout, executeTimeout time.Duration) time.Duration {
 	return min(compileTimeout+executeTimeout+5*time.Second, maxRequestWallClock)
+}
+
+func requestMemoryLimitBytes(defaultLimit int64, requestedMiB *int) (int64, bool) {
+	if requestedMiB == nil || *requestedMiB <= 0 {
+		return defaultLimit, false
+	}
+	maximumMiB := int(maxRequestMemoryLimitBytes / (1024 * 1024))
+	boundedMiB := min(*requestedMiB, maximumMiB)
+	return int64(boundedMiB) * 1024 * 1024, true
 }
 
 // ExecuteJSON accepts a JSON request string and returns a JSON response

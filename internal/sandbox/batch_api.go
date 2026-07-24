@@ -47,15 +47,10 @@ func (api *SandboxAPI) ExecuteBatch(
 		execTimeout = min(time.Duration(*request.Timeout)*time.Second, 30*time.Second)
 		userSpecifiedTimeout = true
 	}
-	memoryLimit := api.cfg.DefaultExecuteMemoryLimit
-	userSpecifiedMemoryLimit := false
-	if request.MemoryLimit != nil && *request.MemoryLimit > 0 {
-		memoryLimit = min(
-			int64(*request.MemoryLimit)*1024*1024,
-			maxRequestMemoryLimitBytes,
-		)
-		userSpecifiedMemoryLimit = true
-	}
+	memoryLimit, userSpecifiedMemoryLimit := requestMemoryLimitBytes(
+		api.cfg.DefaultExecuteMemoryLimit,
+		request.MemoryLimit,
+	)
 	customConfig := api.cfg
 	customConfig.DefaultExecuteTimeLimit = execTimeout
 	customConfig.DefaultExecuteMemoryLimit = memoryLimit
