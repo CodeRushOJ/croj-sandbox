@@ -1,11 +1,5 @@
 package security
 
-import (
-	"os"
-
-	"github.com/CodeRushOJ/croj-sandbox/internal/util"
-)
-
 // SecurityProfile 定义进程安全配置
 type SecurityProfile struct {
 	// Seccomp相关设置
@@ -89,65 +83,4 @@ func ProfileForLanguage(language string) *SecurityProfile {
 	}
 
 	return profile
-}
-
-// SetupSecurity 设置所有安全机制
-func SetupSecurity(profile *SecurityProfile, pid int, runDir string) error {
-	// 创建跨 Pod 唯一的 cgroup ID
-	cgroupID := CgroupIDForProcess("execute", pid)
-
-	// 设置cgroup资源限制
-	if profile.EnableCgroups {
-		manager, err := SetupCgroups(cgroupID, pid, profile)
-		if err != nil {
-			util.ErrorLog("设置cgroup失败: %v", err)
-			return err
-		}
-
-		// 保存cgroup管理器，以便后续清理
-		cgroupManager := manager
-		util.DebugLog("已设置cgroup限制: %s", cgroupID)
-
-		// 注册清理函数
-		RegisterCleanupHandler(func() {
-			if err := CleanupCgroups(cgroupManager); err != nil {
-				util.ErrorLog("清理cgroup失败: %v", err)
-			}
-		})
-	}
-
-	// 应用seccomp系统调用过滤
-	if profile.SeccompMode != "disabled" {
-		if err := ApplySeccompFilters(profile); err != nil {
-			util.ErrorLog("设置seccomp过滤器失败: %v", err)
-			return err
-		}
-		util.DebugLog("已应用seccomp过滤器, 模式: %s", profile.SeccompMode)
-	}
-
-	return nil
-}
-
-// CreateNamespace 创建隔离的命名空间
-func CreateNamespace(cmd *os.Process, profile *SecurityProfile) error {
-	// 在Linux上，我们可以为进程创建隔离的命名空间
-	// 这需要在进程开始前设置
-	return nil
-}
-
-// RegisterCleanupHandler 注册资源清理处理程序
-func RegisterCleanupHandler(handler func()) {
-	// 保存清理函数，以便在执行结束后调用
-	cleanupHandlers = append(cleanupHandlers, handler)
-}
-
-// 保存所有需要执行的清理函数
-var cleanupHandlers []func()
-
-// Cleanup 执行所有注册的清理函数
-func Cleanup() {
-	for _, handler := range cleanupHandlers {
-		handler()
-	}
-	cleanupHandlers = nil
 }

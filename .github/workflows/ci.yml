@@ -28,6 +28,7 @@ jobs:
       - name: Build binaries
         run: |
           CGO_ENABLED=1 go build -trimpath -o /tmp/api-server ./cmd/api-server
+          CGO_ENABLED=1 go build -trimpath -o /tmp/sandbox-exec ./cmd/sandbox-exec
           CGO_ENABLED=1 go build -trimpath -o /tmp/simple-client ./cmd/simple-client
       - name: Build container image
         run: docker build -t coderushoj/croj-sandbox:ci .

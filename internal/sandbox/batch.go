@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -10,11 +9,8 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"time"
 
 	"github.com/CodeRushOJ/croj-sandbox/internal/util"
 )
@@ -70,7 +66,14 @@ func (r *Runner) RunBatchWithConfig(
 		return NewResult(StatusSandboxError, fmt.Errorf("stage source: %w", err))
 	}
 
-	compiledPath, compileOutput, compileResult := compileBatchArtifact(ctx, language, langCfg, cfg, hostRunDir, sourceFilePath)
+	compiledPath, compileOutput, compileResult := r.compileArtifact(
+		ctx,
+		language,
+		langCfg,
+		cfg,
+		hostRunDir,
+		sourceFilePath,
+	)
 	if compileResult.Status != StatusAccepted {
 		compileResult.CompileOutput = compileOutput
 		return compileResult
@@ -98,6 +101,7 @@ func (r *Runner) RunBatchWithConfig(
 		runCfg := cfg
 		runCfg.DefaultExecuteTimeLimit = timeoutDuration
 		runCfg.DefaultExecuteMemoryLimit = memLimitBytes
+		runCfg.WorkingDir = hostRunDir
 		runCfg.Language = language
 		executor := r.executor
 		if executor == nil {
@@ -141,70 +145,4 @@ func tokenOutputSHA256(output string) string {
 		_, _ = hasher.Write([]byte(token))
 	}
 	return hex.EncodeToString(hasher.Sum(nil))
-}
-
-func compileBatchArtifact(
-	ctx context.Context,
-	language string,
-	langCfg LanguageConfig,
-	cfg Config,
-	hostRunDir string,
-	sourceFilePath string,
-) (string, string, Result) {
-	compiledPath := sourceFilePath
-	if langCfg.Compile.CompileCommand == "" {
-		return compiledPath, "", Result{Status: StatusAccepted, ExitCode: 0}
-	}
-	if langCfg.Compile.ExeName == "" {
-		return "", "", NewResult(StatusSandboxError, fmt.Errorf("language %q compile config is missing exeName", language))
-	}
-	executableName := langCfg.Compile.ExeName
-	if runtime.GOOS == "windows" && filepath.Ext(executableName) == "" && language != "java" {
-		executableName += ".exe"
-	}
-	compiledPath = filepath.Join(hostRunDir, executableName)
-	compileCommand := util.ProcessCommandString(langCfg.Compile.CompileCommand, map[string]string{
-		PlaceholderSrcPath: sourceFilePath,
-		PlaceholderExePath: compiledPath,
-		PlaceholderWorkDir: hostRunDir,
-		PlaceholderExeDir:  filepath.Dir(compiledPath),
-	})
-	if compileCommand == "" {
-		return "", "", NewResult(StatusSandboxError, fmt.Errorf("processed compile command for %q is empty", language))
-	}
-	compileTimeout := langCfg.GetCompileTimeout(cfg.DefaultCompileTimeLimit)
-	compileCtx, cancel := context.WithTimeout(ctx, compileTimeout)
-	defer cancel()
-	// #nosec G204 -- commands come from administrator-owned language configuration.
-	command := exec.CommandContext(compileCtx, "sh", "-c", compileCommand)
-	command.Dir = hostRunDir
-	var stdout, stderr bytes.Buffer
-	stdoutLimit, stderrLimit := cfg.MaxStdoutSize, cfg.MaxStderrSize
-	if stdoutLimit <= 0 {
-		stdoutLimit = int64(DefaultMaxStdoutKB) * 1024
-	}
-	if stderrLimit <= 0 {
-		stderrLimit = int64(DefaultMaxStderrKB) * 1024
-	}
-	command.Stdout = NewLimitedWriter(&stdout, stdoutLimit)
-	command.Stderr = NewLimitedWriter(&stderr, stderrLimit)
-	started := time.Now()
-	log.Printf("sandbox event=batch_compile_started language=%s", language)
-	err := command.Run()
-	compileOutput := stdout.String() + stderr.String()
-	durationMillis := time.Since(started).Milliseconds()
-	if err != nil {
-		if errors.Is(compileCtx.Err(), context.DeadlineExceeded) {
-			log.Printf("sandbox event=batch_compile_finished language=%s category=timeout duration_ms=%d diagnostic_bytes=%d", language, durationMillis, len(compileOutput))
-			return "", compileOutput, NewResult(StatusCompileError, fmt.Errorf("%w (limit: %v)", ErrCompileTimeout, compileTimeout))
-		}
-		log.Printf("sandbox event=batch_compile_finished language=%s category=compile_failed duration_ms=%d diagnostic_bytes=%d", language, durationMillis, len(compileOutput))
-		return "", compileOutput, NewResult(StatusCompileError, ErrCompileFailed)
-	}
-	if _, err := os.Stat(compiledPath); err != nil {
-		log.Printf("sandbox event=batch_compile_finished language=%s category=binary_missing duration_ms=%d diagnostic_bytes=%d", language, durationMillis, len(compileOutput))
-		return "", compileOutput, NewResult(StatusCompileError, fmt.Errorf("%w: %w", ErrBinaryNotFound, err))
-	}
-	log.Printf("sandbox event=batch_compile_finished language=%s category=ok duration_ms=%d diagnostic_bytes=%d", language, durationMillis, len(compileOutput))
-	return compiledPath, compileOutput, Result{Status: StatusAccepted, ExitCode: 0}
 }

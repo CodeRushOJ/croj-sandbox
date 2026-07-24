@@ -23,9 +23,15 @@ func SetupHostRunDir(baseDir string) (runDir string, cleanup func(), err error) 
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return "", nil, fmt.Errorf("failed to create base temp directory %s: %w", baseDir, err)
 	}
+	// Isolated request UIDs need execute permission on the root to reach their
+	// own UUID directory. Removing read permission prevents them from listing
+	// sibling request names; each request directory remains mode 0700.
+	if err := os.Chmod(baseDir, 0711); err != nil {
+		return "", nil, fmt.Errorf("failed to secure base temp directory %s: %w", baseDir, err)
+	}
 
 	// Create the specific run directory
-	if err := os.Mkdir(runDir, 0755); err != nil {
+	if err := os.Mkdir(runDir, 0700); err != nil {
 		return "", nil, fmt.Errorf("failed to create host run temp dir %s: %w", runDir, err)
 	}
 	DebugLog("sandbox event=temp_directory_created")

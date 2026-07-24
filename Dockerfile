@@ -21,7 +21,8 @@ COPY . .
 
 # Build the api-server binary
 # CGO is required by libseccomp-golang. Strip debug information to reduce size.
-RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o /api-server ./cmd/api-server
+RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o /api-server ./cmd/api-server \
+    && CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o /sandbox-exec ./cmd/sandbox-exec
 
 # Stage 2: Create the final minimal image
 FROM debian:bookworm-slim
@@ -42,6 +43,7 @@ WORKDIR /app
 
 # Copy the built binary from the builder stage
 COPY --from=builder /api-server /app/api-server
+COPY --from=builder /sandbox-exec /app/sandbox-exec
 COPY --from=builder /usr/local/go /usr/local/go
 
 ENV PATH="/usr/local/go/bin:${PATH}"

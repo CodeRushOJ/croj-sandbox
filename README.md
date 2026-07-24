@@ -14,7 +14,7 @@ CodeRushOJ 的代码编译与执行节点。服务通过 gRPC 接收评测请求
 - 标准 gRPC Health Checking Protocol 和 gRPC reflection
 - Pod 内有界执行并发与 `ResourceExhausted` 过载背压
 - Kubernetes `Service`/`EndpointSlice` 原生发现，不依赖 ZooKeeper
-- Linux cgroup v1/v2 与 seccomp 基础防护
+- Linux cgroup v2、子进程 seccomp、独立非 root UID 与默认禁网的 fail-closed 执行边界
 
 ## 系统位置
 
@@ -56,7 +56,7 @@ service SandboxService {
 
 `ExecuteRequest` 可携带语言、源码、标准输入、超时、内存限制和预期输出；响应包含状态、退出码、stdout、stderr、编译错误、耗时和内存用量。未提供语言时默认使用 Go。
 
-`ExecuteBatchV1` 保留同一份源码和编译产物，在一个 admission slot 内按请求顺序启动独立 case 进程。每个进程仍独立应用执行超时、内存、cgroup/seccomp 与输出上限；`stop_on_failure=true` 时首个非 Accepted 结果后停止。exact 使用 `expected_output`，token 使用规范化 token 序列的 `token_expected_sha256`，因此 token 原始隐藏答案不跨入 sandbox，但 sandbox 仍能在首个 token WA 时早停。事件只允许 `CASE_RESULT`、`COMPILE_ERROR` 和最终 `COMPLETED`。请求必须包含 1..256 个唯一非空 `case_id`，protobuf 编码后不得超过 64 MiB；judging-server 会在 RPC 前做同样的确定性检查。旧 `Execute` 不变，旧客户端可继续使用；judging-server 批量客户端必须和本版本同时发布。
+`ExecuteBatchV1` 保留同一份源码和编译产物，在一个 admission slot 内按请求顺序启动独立 case 进程。编译器和每个 case 都通过同一 fail-closed launcher，分别应用执行超时、输出上限、独立非 root UID、Pod 内请求 cgroup、子进程 seccomp 与禁网策略；任何 launcher、cgroup 或 seccomp 初始化失败都会返回 `Sandbox Error`，不会降级为未隔离执行。`stop_on_failure=true` 时首个非 Accepted 结果后停止。exact 使用 `expected_output`，token 使用规范化 token 序列的 `token_expected_sha256`，因此 token 原始隐藏答案不跨入 sandbox，但 sandbox 仍能在首个 token WA 时早停。事件只允许 `CASE_RESULT`、`COMPILE_ERROR` 和最终 `COMPLETED`。请求必须包含 1..256 个唯一非空 `case_id`，protobuf 编码后不得超过 64 MiB；judging-server 会在 RPC 前做同样的确定性检查。旧 `Execute` 不变，旧客户端可继续使用；judging-server 批量客户端必须和本版本同时发布。
 
 编译产物仅在单个 RPC 的私有临时目录中存在，不跨提交缓存。RPC 正常结束、编译失败、发送失败和 context 取消都清理源码及产物。整个 batch 只占一个 `max-concurrency` slot，满载仍在编译前返回 `ResourceExhausted`。
 
@@ -132,6 +132,7 @@ docker build -t coderushoj/croj-sandbox:dev .
 go test -race -timeout=10m ./...
 go vet ./...
 go build ./cmd/api-server
+go build ./cmd/sandbox-exec
 ```
 
 ## Docker 验证
@@ -147,7 +148,7 @@ docker run --rm --privileged --pid=host \
   --cgroup=/proc/1/ns/cgroup -- /app/api-server
 ```
 
-代码执行会写入 cgroup，并要求 Linux 内核能力。macOS/Windows 上的 Docker VM、rootless Docker 或受限容器中，健康检查可以工作，但实际执行可能因 cgroup 权限不足而降级或失败。不要为了绕过权限问题在生产环境中直接授予无限制的 `--privileged`；应按威胁模型配置专用节点、RuntimeClass 和最小权限。
+代码执行要求统一 cgroup v2，并会在 worker Pod 自身的 cgroup 下创建 `.croj-supervisor` 与 `.croj-jobs/<request>`。macOS/Windows 上的 Docker VM、rootless Docker 或受限容器中，健康检查可以工作，但实际执行会在 cgroup、launcher 或 seccomp 不可用时明确失败，不会降级为未隔离执行。不要为了绕过权限问题在生产环境中直接授予通用业务节点无限制的 `--privileged`；应使用专用污点节点、独立 RuntimeClass 和最小化的 worker 工作负载。
 
 ## Kubernetes 接入
 
@@ -190,10 +191,9 @@ spec:
 
 ## 安全边界
 
-当前实现已经有限时、限输出、进程数、内存监控、cgroup 和 seccomp，但仍有明确的加固项：
+当前实现已经有限时、限输出、进程数、内存监控、统一 cgroup v2、独立运行 UID、子进程 seccomp、环境清洗和 socket 禁用。launcher 在执行目标命令前等待 supervisor 完成 cgroup 放置；之后降权、设置 `no_new_privs`、加载 seccomp，再通过 `execve` 进入编译器或用户程序。仍有以下纵深防御事项：
 
-- 编译器与用户程序目前运行在同一个沙箱 Pod 内
-- seccomp 过滤器加载位置和生命周期需要改为只作用于子进程
+- 编译器与用户程序运行在同一个专用沙箱 Pod，但使用不同的请求进程、UID 和 cgroup
 - 文件系统与网络命名空间尚未形成完整隔离边界
 - cgroup 创建需要节点级权限，生产部署必须使用隔离节点池
 - 仓库中的 Kind 清单使用 privileged、host PID、主机 cgroup 挂载和 `nsenter`，只能用于本地开发

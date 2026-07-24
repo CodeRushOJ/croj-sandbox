@@ -90,7 +90,11 @@ func TestRunnerCompileDiagnosticsStayInResponseAndOutOfLogs(t *testing.T) {
 			}
 			stdin := sentinelStdin
 			expected := sentinelExpected
-			runner := &Runner{cfg: cfg, executor: stubCommandExecutor{}}
+			runner := &Runner{
+				cfg:      cfg,
+				compiler: localTestCommandExecutor{},
+				executor: stubCommandExecutor{},
+			}
 
 			result := runner.RunWithConfig(
 				context.Background(),

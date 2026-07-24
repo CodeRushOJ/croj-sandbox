@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/CodeRushOJ/croj-sandbox/internal/util"
 )
@@ -32,24 +33,12 @@ func CgroupIDForProcess(prefix string, pid int) string {
 
 // SetupCgroups 设置cgroup资源限制
 func SetupCgroups(cgroupID string, pid int, profile *SecurityProfile) (*CgroupManager, error) {
-	// 判断使用v1还是v2版本的cgroup
 	cgroupVersion := detectCgroupVersion()
 	util.DebugLog("检测到cgroup版本: %d", cgroupVersion)
-
-	var manager *CgroupManager
-	var err error
-
-	if cgroupVersion == 2 {
-		manager, err = setupCgroupsV2(cgroupID, pid, profile)
-	} else {
-		manager, err = setupCgroupsV1(cgroupID, pid, profile)
+	if cgroupVersion != 2 {
+		return nil, fmt.Errorf("cgroup v2 is required for request isolation")
 	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	return manager, nil
+	return setupCgroupsV2(cgroupID, pid, profile)
 }
 
 // CleanupCgroups 清理cgroup资源
@@ -180,33 +169,13 @@ func setupCgroupsV2(cgroupID string, pid int, profile *SecurityProfile) (*Cgroup
 		Version: 2,
 	}
 
-	parentPath := filepath.Join("/sys/fs/cgroup", "croj")
-	if err := os.MkdirAll(parentPath, 0755); err != nil {
-		return nil, fmt.Errorf("创建cgroup v2父目录失败: %w", err)
-	}
-	controllers, err := os.ReadFile(filepath.Join(parentPath, "cgroup.controllers"))
+	parentPath, err := requestCgroupRoot()
 	if err != nil {
-		return nil, fmt.Errorf("读取cgroup v2控制器失败: %w", err)
-	}
-	available := make(map[string]bool)
-	for _, controller := range strings.Fields(string(controllers)) {
-		available[controller] = true
-	}
-	for _, required := range []string{"memory", "cpu", "pids"} {
-		if !available[required] {
-			return nil, fmt.Errorf("缺少cgroup v2控制器: %s", required)
-		}
-	}
-	if err := os.WriteFile(
-		filepath.Join(parentPath, "cgroup.subtree_control"),
-		[]byte("+memory +cpu +pids"),
-		0644,
-	); err != nil {
-		return nil, fmt.Errorf("委派cgroup v2控制器失败: %w", err)
+		return nil, err
 	}
 
 	cgroupPath := filepath.Join(parentPath, cgroupID)
-	if err := os.MkdirAll(cgroupPath, 0755); err != nil {
+	if err := os.Mkdir(cgroupPath, 0700); err != nil {
 		return nil, fmt.Errorf("创建cgroup v2目录失败: %w", err)
 	}
 	initialized := false
@@ -254,7 +223,7 @@ func setupCgroupsV2(cgroupID string, pid int, profile *SecurityProfile) (*Cgroup
 		return nil, fmt.Errorf("将进程添加到cgroup失败: %w", err)
 	}
 
-	manager.BasePath = "/sys/fs/cgroup"
+	manager.BasePath = cgroupPath
 	manager.Initialized = true
 	initialized = true
 
@@ -280,8 +249,10 @@ func cleanupCgroupV1(manager *CgroupManager) error {
 
 // cleanupCgroupV2 清理cgroup v2资源
 func cleanupCgroupV2(manager *CgroupManager) error {
-	// V2只需要删除一个目录
-	cgroupPath := filepath.Join("/sys/fs/cgroup", "croj", manager.GroupID)
+	cgroupPath := manager.BasePath
+	if cgroupPath == "" {
+		return fmt.Errorf("cgroup manager path is missing")
+	}
 
 	// 尝试删除目录
 	if err := os.Remove(cgroupPath); err != nil && !os.IsNotExist(err) {
@@ -289,4 +260,124 @@ func cleanupCgroupV2(manager *CgroupManager) error {
 	}
 
 	return nil
+}
+
+var requestCgroupState struct {
+	sync.Mutex
+	root string
+}
+
+// requestCgroupRoot creates request cgroups below the worker Pod's own cgroup.
+// Keeping both the supervisor and every contestant below this boundary
+// preserves kubelet lifecycle and Pod-level resource enforcement.
+func requestCgroupRoot() (string, error) {
+	requestCgroupState.Lock()
+	defer requestCgroupState.Unlock()
+	if requestCgroupState.root != "" {
+		return requestCgroupState.root, nil
+	}
+
+	membership, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return "", fmt.Errorf("read supervisor cgroup membership: %w", err)
+	}
+	podCgroup, err := resolveUnifiedCgroupPath("/sys/fs/cgroup", membership)
+	if err != nil {
+		return "", err
+	}
+	if filepath.Base(podCgroup) == ".croj-supervisor" {
+		podCgroup = filepath.Dir(podCgroup)
+	}
+
+	supervisorPath := filepath.Join(podCgroup, ".croj-supervisor")
+	jobsPath := filepath.Join(podCgroup, ".croj-jobs")
+	if err := os.Mkdir(supervisorPath, 0700); err != nil && !os.IsExist(err) {
+		return "", fmt.Errorf("create supervisor cgroup: %w", err)
+	}
+	if err := moveProcessesToSupervisor(podCgroup, supervisorPath); err != nil {
+		return "", err
+	}
+	if err := enableControllers(podCgroup); err != nil {
+		return "", err
+	}
+	if err := os.Mkdir(jobsPath, 0700); err != nil && !os.IsExist(err) {
+		return "", fmt.Errorf("create request cgroup root: %w", err)
+	}
+	if err := enableControllers(jobsPath); err != nil {
+		return "", err
+	}
+	requestCgroupState.root = jobsPath
+	return jobsPath, nil
+}
+
+func moveProcessesToSupervisor(podCgroup string, supervisorPath string) error {
+	source := filepath.Join(podCgroup, "cgroup.procs")
+	target := filepath.Join(supervisorPath, "cgroup.procs")
+	for attempt := 0; attempt < 10; attempt++ {
+		processes, err := os.ReadFile(source)
+		if err != nil {
+			return fmt.Errorf("read Pod cgroup processes: %w", err)
+		}
+		pids := strings.Fields(string(processes))
+		if len(pids) == 0 {
+			return nil
+		}
+		for _, pid := range pids {
+			if _, err := strconv.Atoi(pid); err != nil {
+				return fmt.Errorf("invalid PID in Pod cgroup")
+			}
+			if err := os.WriteFile(target, []byte(pid), 0600); err != nil {
+				return fmt.Errorf("move PID %s into supervisor cgroup: %w", pid, err)
+			}
+		}
+	}
+	return fmt.Errorf("Pod cgroup remained populated while enabling request controllers")
+}
+
+func enableControllers(path string) error {
+	controllers, err := os.ReadFile(filepath.Join(path, "cgroup.controllers"))
+	if err != nil {
+		return fmt.Errorf("read available controllers for %s: %w", path, err)
+	}
+	available := make(map[string]bool)
+	for _, controller := range strings.Fields(string(controllers)) {
+		available[controller] = true
+	}
+	for _, required := range []string{"memory", "cpu", "pids"} {
+		if !available[required] {
+			return fmt.Errorf(
+				"required cgroup v2 controller %s is unavailable below the Pod cgroup",
+				required,
+			)
+		}
+	}
+	if err := os.WriteFile(
+		filepath.Join(path, "cgroup.subtree_control"),
+		[]byte("+memory +cpu +pids"),
+		0600,
+	); err != nil {
+		return fmt.Errorf("delegate Pod cgroup v2 controllers: %w", err)
+	}
+	return nil
+}
+
+func resolveUnifiedCgroupPath(root string, membership []byte) (string, error) {
+	for _, line := range strings.Split(strings.TrimSpace(string(membership)), "\n") {
+		if !strings.HasPrefix(line, "0::/") {
+			continue
+		}
+		relative := strings.TrimPrefix(line, "0::/")
+		clean := filepath.Clean(relative)
+		if clean == "." || clean == ".." || filepath.IsAbs(clean) ||
+			strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return "", fmt.Errorf("invalid unified cgroup path")
+		}
+		resolved := filepath.Join(root, clean)
+		rootWithSeparator := filepath.Clean(root) + string(filepath.Separator)
+		if !strings.HasPrefix(resolved+string(filepath.Separator), rootWithSeparator) {
+			return "", fmt.Errorf("unified cgroup path escapes mount root")
+		}
+		return resolved, nil
+	}
+	return "", fmt.Errorf("unified cgroup v2 membership is missing")
 }

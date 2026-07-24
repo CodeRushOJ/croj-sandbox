@@ -16,6 +16,8 @@
 - 标准 gRPC health/reflection，以及工具链、临时目录和真实 cgroup 迁移启动自检
 - 双副本 Kind 开发清单、原生 gRPC probes、CI、竞态测试和 cgroup 集成测试
 - 五语言最终镜像工具链校验：Go、C++、Python、Java、JavaScript
+- 增加短生命周期 `sandbox-exec` launcher，在目标进程进入请求 cgroup 后降为独立 UID、设置 `no_new_privs`、加载 seccomp 并清洗环境
+- 增加特权 Linux 集成测试，验证非 root、零有效 capability、seccomp、请求 cgroup、环境隔离和 socket 禁用
 
 ### Changed
 
@@ -24,10 +26,15 @@
 - cgroup v2 在父级正确委派 memory/cpu/pids controller，并按 Pod UID 隔离 cgroup 名称
 - Go 构建与运行工具链升级至 1.24.6，Java 镜像从 JRE 改为 JDK 17
 - sandbox 日志改为稳定的 `event`/`category` 与有界指标；verbose CLI 日志只显示响应字段长度和执行元数据
+- 编译器与用户程序统一通过 fail-closed 执行器；cgroup、launcher 或 seccomp 不可用时不再降级执行
+- 请求 cgroup 固定创建在 worker Pod 自身 cgroup 下，并要求统一 cgroup v2
 
 ### Fixed
 
 - 修复进程监控在后台 goroutine 仍写入统计数据时提前返回导致的竞态，并确保自然退出、超时和取消路径均返回最终快照
+- 修复 seccomp 曾在 API Server 线程而非目标子进程中加载、初始化失败仍继续执行的问题
+- 修复编译器绕过 cgroup、seccomp、网络、输出和身份边界直接运行的问题
+- 修复跨请求共享 cgroup cleanup 状态导致的竞态与误清理风险
 - 限制 batch 编译诊断内存并去除 `error`/`compile_error` 重复载荷，避免大输出触发 OOM 或错误重试
 - token checker 改用规范化 token 序列 SHA-256 在 sandbox 内判定，原始 expected 不跨服务边界且恢复首错早停
 - 修复 cgroup v2 清理被误判为 v1 的问题

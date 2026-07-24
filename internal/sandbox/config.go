@@ -2,36 +2,37 @@
 package sandbox
 
 import (
-    "time"
+	"time"
 )
 
 // Command template placeholders
 const (
-	PlaceholderSrcPath  = "{{SRC_PATH}}"  // Source code file path
-	PlaceholderExePath  = "{{EXE_PATH}}"  // Executable/output file path
-	PlaceholderWorkDir  = "{{WORK_DIR}}"  // Working directory path
-	PlaceholderExeDir   = "{{EXE_DIR}}"   // Directory containing the executable
+	PlaceholderSrcPath   = "{{SRC_PATH}}" // Source code file path
+	PlaceholderExePath   = "{{EXE_PATH}}" // Executable/output file path
+	PlaceholderWorkDir   = "{{WORK_DIR}}" // Working directory path
+	PlaceholderExeDir    = "{{EXE_DIR}}"  // Directory containing the executable
 	PlaceholderMaxMemory = "{{MAX_MEM}}"  // Maximum memory in KB
 )
 
 const (
 	// --- Default Execution Limits ---
-	DefaultCompileTimeLimitSec = 10 // Default compile timeout in seconds
-	DefaultExecuteTimeLimitSec = 3  // Default execution timeout in seconds
-	DefaultMaxStdoutKB         = 64 // Default max stdout size in KB
-	DefaultMaxStderrKB         = 64 // Default max stderr size in KB
+	DefaultCompileTimeLimitSec = 10  // Default compile timeout in seconds
+	DefaultExecuteTimeLimitSec = 3   // Default execution timeout in seconds
+	DefaultMaxStdoutKB         = 64  // Default max stdout size in KB
+	DefaultMaxStderrKB         = 64  // Default max stderr size in KB
 	DefaultMemoryLimitMB       = 512 // Default memory limit in MB
 
 	// --- Host Environment ---
-	DefaultHostTempDir = "/tmp/croj-sandbox-local-runs" // Default host temp directory
+	DefaultHostTempDir     = "/tmp/croj-sandbox-local-runs" // Default host temp directory
+	DefaultSandboxExecPath = "/app/sandbox-exec"
 )
 
 // CompileConfig defines how to compile a language source file
 type CompileConfig struct {
-	SrcName       string `json:"srcName"`       // Source file name (e.g., "main.go")
-	ExeName       string `json:"exeName"`       // Output executable name
-	CompileCommand string `json:"command"`      // Compile command template
-	TimeoutSec    int    `json:"timeoutSec"`   // Compile timeout in seconds (0 = use default)
+	SrcName        string `json:"srcName"`    // Source file name (e.g., "main.go")
+	ExeName        string `json:"exeName"`    // Output executable name
+	CompileCommand string `json:"command"`    // Compile command template
+	TimeoutSec     int    `json:"timeoutSec"` // Compile timeout in seconds (0 = use default)
 }
 
 // RunConfig defines how to run a compiled or interpreted language
@@ -63,7 +64,7 @@ func (lc *LanguageConfig) GetExecuteTimeout(defaultTimeout time.Duration, userSp
 	if len(userSpecified) > 0 && userSpecified[0] {
 		return defaultTimeout
 	}
-	
+
 	// 否则检查语言配置
 	if lc.Run.TimeoutSec <= 0 {
 		return defaultTimeout
@@ -82,47 +83,50 @@ func (lc *LanguageConfig) GetMemoryLimit(defaultLimit int64) int64 {
 // Config holds the configuration for the sandbox system.
 type Config struct {
 	// Host Environment
-	HostTempDir            string                    `json:"hostTempDir"`
-	DefaultCompileTimeLimit time.Duration            `json:"defaultCompileTimeLimit"`
-	DefaultExecuteTimeLimit time.Duration            `json:"defaultExecuteTimeLimit"`
-	DefaultExecuteMemoryLimit int64                  `json:"defaultExecuteMemoryLimit"`
-	MaxStdoutSize          int64                     `json:"maxStdoutSize"`
-	MaxStderrSize          int64                     `json:"maxStderrSize"`
-	Languages              map[string]LanguageConfig `json:"languages"`
-	
+	HostTempDir               string                    `json:"hostTempDir"`
+	WorkingDir                string                    `json:"-"`
+	SandboxExecPath           string                    `json:"sandboxExecPath"`
+	DefaultCompileTimeLimit   time.Duration             `json:"defaultCompileTimeLimit"`
+	DefaultExecuteTimeLimit   time.Duration             `json:"defaultExecuteTimeLimit"`
+	DefaultExecuteMemoryLimit int64                     `json:"defaultExecuteMemoryLimit"`
+	MaxStdoutSize             int64                     `json:"maxStdoutSize"`
+	MaxStderrSize             int64                     `json:"maxStderrSize"`
+	Languages                 map[string]LanguageConfig `json:"languages"`
+
 	// 保留旧的字段名称以兼容API
-	CompileTimeout         time.Duration  // 兼容字段
-	ExecTimeout            time.Duration  // 兼容字段
-	SrcFileName            string         // 兼容字段
+	CompileTimeout time.Duration // 兼容字段
+	ExecTimeout    time.Duration // 兼容字段
+	SrcFileName    string        // 兼容字段
 
 	// 是否使用用户指定的超时（优先级高于语言配置）
 	UserSpecifiedTimeout bool
 
 	// 安全相关设置
-	Language           string // 执行的编程语言
-	StrictSecurity     bool   // 使用严格的安全限制
-	NoSecurity         bool   // 完全禁用安全限制
-	DisableNetworking  bool   // 禁用网络访问
-	DisableFileWrite   bool   // 禁用文件写入（只读模式）
-	AllowedPaths       []string // 允许访问的路径列表
-	SeccompProfile     string // 自定义seccomp配置文件路径
+	Language          string   // 执行的编程语言
+	StrictSecurity    bool     // 使用严格的安全限制
+	NoSecurity        bool     // 完全禁用安全限制
+	DisableNetworking bool     // 禁用网络访问
+	DisableFileWrite  bool     // 禁用文件写入（只读模式）
+	AllowedPaths      []string // 允许访问的路径列表
+	SeccompProfile    string   // 自定义seccomp配置文件路径
 }
 
 // DefaultConfig returns a new Config struct with default values and language settings.
 func DefaultConfig() Config {
 	cfg := Config{
-		HostTempDir:            DefaultHostTempDir,
-		DefaultCompileTimeLimit: time.Duration(DefaultCompileTimeLimitSec) * time.Second,
-		DefaultExecuteTimeLimit: time.Duration(DefaultExecuteTimeLimitSec) * time.Second,
+		HostTempDir:               DefaultHostTempDir,
+		SandboxExecPath:           DefaultSandboxExecPath,
+		DefaultCompileTimeLimit:   time.Duration(DefaultCompileTimeLimitSec) * time.Second,
+		DefaultExecuteTimeLimit:   time.Duration(DefaultExecuteTimeLimitSec) * time.Second,
 		DefaultExecuteMemoryLimit: int64(DefaultMemoryLimitMB) * 1024 * 1024,
-		MaxStdoutSize:          int64(DefaultMaxStdoutKB) * 1024,
-		MaxStderrSize:          int64(DefaultMaxStderrKB) * 1024,
-		Languages:              make(map[string]LanguageConfig),
-		
+		MaxStdoutSize:             int64(DefaultMaxStdoutKB) * 1024,
+		MaxStderrSize:             int64(DefaultMaxStderrKB) * 1024,
+		Languages:                 make(map[string]LanguageConfig),
+
 		// 为了兼容API，保留旧字段值
-		CompileTimeout:         time.Duration(DefaultCompileTimeLimitSec) * time.Second,
-		ExecTimeout:            time.Duration(DefaultExecuteTimeLimitSec) * time.Second,
-		SrcFileName:            "main.go",
+		CompileTimeout: time.Duration(DefaultCompileTimeLimitSec) * time.Second,
+		ExecTimeout:    time.Duration(DefaultExecuteTimeLimitSec) * time.Second,
+		SrcFileName:    "main.go",
 
 		// 默认安全设置
 		StrictSecurity:    true,

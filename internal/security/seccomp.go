@@ -3,129 +3,107 @@ package security
 import (
 	"fmt"
 
-	"github.com/seccomp/libseccomp-golang"
-	"github.com/CodeRushOJ/croj-sandbox/internal/util"
+	seccomp "github.com/seccomp/libseccomp-golang"
+	"golang.org/x/sys/unix"
 )
 
-// ApplySeccompFilters 应用seccomp系统调用过滤器
+// blockedPrivilegeSyscalls are never required by a contestant process. The
+// sandbox runs language tools without capabilities, and seccomp is a second
+// boundary that prevents regaining host control through privileged kernel
+// APIs even when the worker supervisor itself is privileged.
+var blockedPrivilegeSyscalls = []string{
+	"acct",
+	"add_key",
+	"bpf",
+	"chroot",
+	"delete_module",
+	"fanotify_init",
+	"finit_module",
+	"init_module",
+	"ioperm",
+	"iopl",
+	"kcmp",
+	"kexec_file_load",
+	"kexec_load",
+	"keyctl",
+	"lookup_dcookie",
+	"mount",
+	"move_mount",
+	"name_to_handle_at",
+	"open_by_handle_at",
+	"open_tree",
+	"perf_event_open",
+	"pivot_root",
+	"process_vm_readv",
+	"process_vm_writev",
+	"ptrace",
+	"quotactl",
+	"reboot",
+	"request_key",
+	"setdomainname",
+	"sethostname",
+	"setns",
+	"swapoff",
+	"swapon",
+	"umount",
+	"umount2",
+	"unshare",
+	"userfaultfd",
+}
+
+// ApplySeccompFilters applies a fail-closed deny policy to the calling
+// process. It must only be called by the short-lived sandbox-exec child after
+// the supervisor has placed that child in its request cgroup. The filter is
+// inherited across execve by the contestant program.
 func ApplySeccompFilters(profile *SecurityProfile) error {
-	// 默认设置为拒绝所有系统调用
-	defaultAction := seccomp.ActErrno
-	if profile.SeccompMode == "strict" {
-		defaultAction = seccomp.ActKill // 更严格的模式：直接终止进程
+	if profile == nil {
+		return fmt.Errorf("security profile is required")
 	}
-	
-	// 创建seccomp过滤器
-	filter, err := seccomp.NewFilter(defaultAction)
+	if profile.SeccompMode == "disabled" {
+		return fmt.Errorf("seccomp cannot be disabled for contestant execution")
+	}
+
+	filter, err := seccomp.NewFilter(seccomp.ActAllow)
 	if err != nil {
-		return fmt.Errorf("创建seccomp过滤器失败: %w", err)
+		return fmt.Errorf("create seccomp filter: %w", err)
 	}
-	
-	// 允许的系统调用列表
-	allowedSyscalls := profile.AllowedSyscalls
-	if len(allowedSyscalls) == 0 {
-		// 如果未指定，使用默认安全列表
-		allowedSyscalls = GetDefaultAllowedSyscalls()
+	if err := filter.SetNoNewPrivsBit(true); err != nil {
+		return fmt.Errorf("set seccomp no-new-privileges bit: %w", err)
 	}
-	
-	// 添加白名单系统调用
-	for _, syscallName := range allowedSyscalls {
-		syscallID, err := seccomp.GetSyscallFromName(syscallName)
-		if err != nil {
-			util.WarnLog("系统调用不存在: %s (忽略)", syscallName)
+	deniedAction := seccomp.ActErrno.SetReturnCode(int16(unix.EPERM))
+
+	for _, syscallName := range blockedPrivilegeSyscalls {
+		syscallID, lookupErr := seccomp.GetSyscallFromName(syscallName)
+		if lookupErr != nil {
+			// Syscall tables differ between supported CPU architectures.
 			continue
 		}
-		
-		if err := filter.AddRule(syscallID, seccomp.ActAllow); err != nil {
-			util.WarnLog("添加系统调用规则失败 %s: %v", syscallName, err)
+		if err := filter.AddRule(syscallID, deniedAction); err != nil {
+			return fmt.Errorf("block syscall %s: %w", syscallName, err)
 		}
 	}
-	
-	// 特殊处理：添加对socket系统调用的精细控制
+
 	if profile.DisableNetwork {
-		// 允许socket但有条件限制
 		socketCall, err := seccomp.GetSyscallFromName("socket")
-		if err == nil {
-			// 仅允许本地通信的socket类型
-			filter.AddRuleConditional(
-				socketCall,
-				seccomp.ActAllow,
-				[]seccomp.ScmpCondition{
-					{
-						Argument: 0,
-						Op:       seccomp.CompareMaskedEqual,
-						Operand1: 1, // AF_UNIX
-						Operand2: 0xFFFFFFFF,
-					},
-				},
-			)
-			
-			filter.AddRuleConditional(
-				socketCall,
-				seccomp.ActErrno,
-				[]seccomp.ScmpCondition{
-					{
-						Argument: 0,
-						Op:       seccomp.CompareNotEqual,
-						Operand1: 1, // 只允许AF_UNIX
-						Operand2: 0xFFFFFFFF,
-					},
-				},
-			)
+		if err != nil {
+			return fmt.Errorf("resolve socket syscall: %w", err)
+		}
+		if err := filter.AddRule(socketCall, deniedAction); err != nil {
+			return fmt.Errorf("block sockets: %w", err)
 		}
 	}
-	
-	// 如果禁止执行其他程序
-	if profile.DisableExec {
-		execveSyscall, err := seccomp.GetSyscallFromName("execve")
-		if err == nil {
-			filter.AddRule(execveSyscall, seccomp.ActErrno)
-		}
-		
-		execveatSyscall, err := seccomp.GetSyscallFromName("execveat")
-		if err == nil {
-			filter.AddRule(execveatSyscall, seccomp.ActErrno)
-		}
-	}
-	
-	// 加载seccomp过滤器
+
 	if err := filter.Load(); err != nil {
-		return fmt.Errorf("加载seccomp过滤器失败: %w", err)
+		return fmt.Errorf("load seccomp filter: %w", err)
 	}
-	
 	return nil
 }
 
-// GetDefaultAllowedSyscalls 返回默认允许的系统调用列表
+// GetDefaultAllowedSyscalls remains for source compatibility with callers
+// that construct SecurityProfile values. Enforcement is deny-based because
+// the five supported language runtimes have materially different evolving
+// syscall surfaces; privileged and network syscalls are still explicitly
+// blocked above.
 func GetDefaultAllowedSyscalls() []string {
-	// 这是一个比较安全的系统调用白名单
-	return []string{
-		// 常规I/O操作
-		"read", "write", "close", "fstat", "lseek", "mmap", "mprotect", "munmap", "brk",
-		"readv", "writev", "pread64", "pwrite64", "lstat", "readlink",
-		
-		// 文件操作
-		"access", "open", "openat", "stat", "getcwd", "fcntl",
-		"fstatfs", "getdents", "getdents64", "readdir", "rename", "unlink", "rmdir", 
-		"mkdir", "link", "chmod", "truncate", "fallocate", "utime", "chdir", "dup", "dup2", "pipe",
-		
-		// 进程管理
-		"clone", "fork", "vfork", "wait4", "kill", "exit", "exit_group", 
-		"rt_sigreturn", "rt_sigaction", "rt_sigprocmask", "rt_sigqueueinfo",
-		"setitimer", "getitimer", "nanosleep", "clock_gettime", "sched_yield",
-		
-		// 内存管理
-		"mremap", "msync", "mincore", "madvise", "shmget", "shmat", "shmdt", "shmctl",
-		
-		// 资源信息
-		"getrusage", "getrlimit", "getpriority", "getuid", "geteuid", "getgid", "getegid",
-		"gettid", "getpid", "getppid", "gettimeofday", "uname", "getrandom",
-		
-		// 套接字（受条件控制）
-		"socket", "socketpair", "bind", "listen", "accept", "accept4", "connect",
-		
-		// 其他必要调用
-		"futex", "epoll_create", "epoll_create1", "epoll_ctl", "epoll_wait", "epoll_pwait",
-		"select", "poll", "timerfd_create", "timerfd_settime", "timerfd_gettime",
-	}
+	return nil
 }

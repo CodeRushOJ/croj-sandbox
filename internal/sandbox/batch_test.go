@@ -28,7 +28,11 @@ func TestRunBatchStopsOnTokenHashMismatchWithoutRawExpectedOutput(t *testing.T) 
 		}},
 	}
 	executor := &batchCommandExecutor{results: []Result{{Status: StatusAccepted, Stdout: "wrong"}, {Status: StatusAccepted, Stdout: "two"}}}
-	runner := &Runner{cfg: cfg, executor: executor}
+	runner := &Runner{
+		cfg:      cfg,
+		compiler: localTestCommandExecutor{},
+		executor: executor,
+	}
 	input := "hidden"
 	hashHex := "615f69ed4e249a34955fc08be20fc324c06462f6ae8b817d22280505adca9209"
 	emitted := 0
@@ -78,7 +82,11 @@ func TestRunBatchCompilesOnceAndEmitsOrderedCaseResults(t *testing.T) {
 		{Status: StatusAccepted, Stdout: "one", TimeUsedMillis: 7, MemoryUsedKB: 10},
 		{Status: StatusAccepted, Stdout: "two", TimeUsedMillis: 9, MemoryUsedKB: 12},
 	}}
-	runner := &Runner{cfg: cfg, executor: executor}
+	runner := &Runner{
+		cfg:      cfg,
+		compiler: localTestCommandExecutor{},
+		executor: executor,
+	}
 	inputs := []string{"input-one", "input-two"}
 	emitted := make([]BatchCaseResult, 0, 2)
 
@@ -164,7 +172,14 @@ func TestRunBatchBoundsCompileDiagnostics(t *testing.T) {
 			Run: RunConfig{Command: "{{EXE_PATH}}"},
 		}},
 	}
-	runner := &Runner{cfg: cfg, executor: &batchCommandExecutor{}}
+	runner := &Runner{
+		cfg: cfg,
+		compiler: localTestCommandExecutor{
+			stdoutLimit: cfg.MaxStdoutSize,
+			stderrLimit: cfg.MaxStderrSize,
+		},
+		executor: &batchCommandExecutor{},
+	}
 	input := "input"
 
 	result := runner.RunBatchWithConfig(context.Background(), "test", "source", []BatchCase{{ID: "case-1", Stdin: &input}}, true, cfg, func(BatchCaseResult) error {

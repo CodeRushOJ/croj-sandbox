@@ -8,8 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/CodeRushOJ/croj-sandbox/internal/security"
@@ -34,17 +38,57 @@ func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]
 	if len(runCmd) == 0 {
 		return NewResult(StatusSandboxError, fmt.Errorf("empty command provided to executor"))
 	}
+	if e.cfg.WorkingDir == "" {
+		return NewResult(StatusSandboxError, fmt.Errorf("request working directory is required"))
+	}
+	launcherPath := e.cfg.SandboxExecPath
+	if launcherPath == "" {
+		launcherPath = DefaultSandboxExecPath
+	}
+	resolvedLauncher, err := exec.LookPath(launcherPath)
+	if err != nil {
+		return NewResult(StatusSandboxError, fmt.Errorf("security launcher is unavailable: %w", err))
+	}
 
 	util.DebugLog("sandbox event=command_prepared argv_count=%d", len(runCmd))
-	execCmd := exec.CommandContext(ctx, runCmd[0], runCmd[1:]...)
+	launcherArgs := []string{
+		"--language", e.cfg.Language,
+		"--work-dir", e.cfg.WorkingDir,
+	}
+	environmentNames := make([]string, 0, len(env))
+	for name := range env {
+		environmentNames = append(environmentNames, name)
+	}
+	sort.Strings(environmentNames)
+	for _, name := range environmentNames {
+		launcherArgs = append(launcherArgs, "--target-env", name+"="+env[name])
+	}
+	launcherArgs = append(launcherArgs, "--")
+	launcherArgs = append(launcherArgs, runCmd...)
 
-	// Set environment variables if provided
-	if len(env) > 0 {
-		execEnv := execCmd.Environ() // Start with current environment
-		for k, v := range env {
-			execEnv = append(execEnv, fmt.Sprintf("%s=%s", k, v))
-		}
-		execCmd.Env = execEnv
+	gateReader, gateWriter, err := os.Pipe()
+	if err != nil {
+		return NewResult(StatusSandboxError, fmt.Errorf("create isolation gate: %w", err))
+	}
+	defer gateReader.Close()
+	defer gateWriter.Close()
+	statusReader, statusWriter, err := os.Pipe()
+	if err != nil {
+		return NewResult(StatusSandboxError, fmt.Errorf("create isolation status pipe: %w", err))
+	}
+	defer statusReader.Close()
+	defer statusWriter.Close()
+
+	execCmd := exec.CommandContext(ctx, resolvedLauncher, launcherArgs...)
+	execCmd.Env = []string{
+		"PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"LANG=C.UTF-8",
+		"LC_ALL=C.UTF-8",
+	}
+	execCmd.ExtraFiles = []*os.File{gateReader, statusWriter}
+	execCmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid:   true,
+		Pdeathsig: syscall.SIGKILL,
 	}
 
 	// Setup stdin if provided
@@ -83,14 +127,8 @@ func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]
 	if err := execCmd.Start(); err != nil {
 		return NewResult(StatusSandboxError, fmt.Errorf("failed to start command: %w", err))
 	}
-	if stdinPipe != nil {
-		go func() {
-			defer stdinPipe.Close()
-			if _, err := io.WriteString(stdinPipe, *stdinData); err != nil {
-				log.Printf("sandbox event=stdin_write_failed category=pipe_write")
-			}
-		}()
-	}
+	_ = gateReader.Close()
+	_ = statusWriter.Close()
 
 	// 获取进程ID并开始监控资源使用
 	pid := execCmd.Process.Pid
@@ -106,15 +144,58 @@ func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]
 	// 设置内存限制
 	secProfile.MemoryLimitBytes = e.cfg.DefaultExecuteMemoryLimit
 
-	// 应用安全限制和资源隔离
-	if err := security.SetupSecurity(secProfile, pid, ""); err != nil {
-		util.WarnLog("sandbox event=security_setup_failed category=resource_isolation")
-	} else {
-		util.DebugLog("已应用Linux安全限制")
+	if err := prepareRequestWorkingDirectory(e.cfg.WorkingDir, pid); err != nil {
+		terminateUnreadyProcess(execCmd)
+		return NewResult(StatusSandboxError, fmt.Errorf("prepare isolated working directory: %w", err))
 	}
 
-	// 注册执行结束时的清理函数
-	defer security.Cleanup()
+	var cgroupManager *security.CgroupManager
+	if secProfile.EnableCgroups {
+		cgroupManager, err = security.SetupCgroups(
+			security.CgroupIDForProcess("execute", pid),
+			pid,
+			secProfile,
+		)
+		if err != nil {
+			terminateUnreadyProcess(execCmd)
+			return NewResult(StatusSandboxError, fmt.Errorf("configure request cgroup: %w", err))
+		}
+		defer func() {
+			if err := security.CleanupCgroups(cgroupManager); err != nil {
+				util.WarnLog("sandbox event=cgroup_cleanup_failed category=resource_isolation")
+			}
+		}()
+	} else {
+		terminateUnreadyProcess(execCmd)
+		return NewResult(StatusSandboxError, fmt.Errorf("request cgroup isolation is required"))
+	}
+
+	if _, err := gateWriter.Write([]byte{1}); err != nil {
+		terminateUnreadyProcess(execCmd)
+		return NewResult(StatusSandboxError, fmt.Errorf("release security launcher: %w", err))
+	}
+	_ = gateWriter.Close()
+
+	if err := statusReader.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		terminateUnreadyProcess(execCmd)
+		return NewResult(StatusSandboxError, fmt.Errorf("bound launcher handshake: %w", err))
+	}
+	var ready [1]byte
+	if count, err := statusReader.Read(ready[:]); err != nil || count != 1 || ready[0] != 1 {
+		terminateUnreadyProcess(execCmd)
+		return NewResult(StatusSandboxError, fmt.Errorf("security launcher failed before contestant exec"))
+	}
+	_ = statusReader.Close()
+	util.DebugLog("sandbox event=isolation_ready pid=%d", pid)
+
+	if stdinPipe != nil {
+		go func() {
+			defer stdinPipe.Close()
+			if _, err := io.WriteString(stdinPipe, *stdinData); err != nil {
+				log.Printf("sandbox event=stdin_write_failed category=pipe_write")
+			}
+		}()
+	}
 
 	// 创建监控通道
 	monitorDone := make(chan struct{})
@@ -224,6 +305,39 @@ func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]
 	}
 
 	return result
+}
+
+func prepareRequestWorkingDirectory(path string, pid int) error {
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(absolutePath)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("working path is not a directory")
+	}
+	uid := security.IsolatedUIDForProcess(pid)
+	if err := filepath.WalkDir(absolutePath, func(entryPath string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		return os.Lchown(entryPath, uid, uid)
+	}); err != nil {
+		return err
+	}
+	return os.Chmod(absolutePath, 0o700)
+}
+
+func terminateUnreadyProcess(command *exec.Cmd) {
+	if command == nil || command.Process == nil {
+		return
+	}
+	_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+	_ = command.Process.Kill()
+	_ = command.Wait()
 }
 
 // --- LimitedWriter ---
