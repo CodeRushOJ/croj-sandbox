@@ -16,7 +16,7 @@ const (
 
 const (
 	// --- Default Execution Limits ---
-	DefaultCompileTimeLimitSec = 10  // Default compile timeout in seconds
+	DefaultCompileTimeLimitSec = 30  // Includes cold, isolated toolchain startup.
 	DefaultExecuteTimeLimitSec = 3   // Default execution timeout in seconds
 	DefaultMaxStdoutKB         = 64  // Default max stdout size in KB
 	DefaultMaxStderrKB         = 64  // Default max stderr size in KB

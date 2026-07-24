@@ -80,7 +80,7 @@ API Server 使用命令行参数：
 | `-languages` | `go,cpp,python,java,javascript` | 允许的语言列表 |
 | `-max-concurrency` | 当前进程 `GOMAXPROCS`，至少为 `1` | 每个 Pod 同时进行的编译/执行数，显式值必须大于 `0` |
 
-默认编译超时为 10 秒，默认内存限制为 512 MiB，stdout 与 stderr 各限制 64 KiB。请求可以缩短或调整执行限制；内存请求上限由服务端限制为 4 GiB。
+默认编译超时为 30 秒；Go 因独立 UID、私有构建缓存以及同一 worker 上的并发冷编译使用 90 秒预算。默认内存限制为 512 MiB，stdout 与 stderr 各限制 64 KiB。请求可以缩短或调整执行限制；内存请求上限由服务端限制为 4 GiB。
 
 ### 并发与背压
 

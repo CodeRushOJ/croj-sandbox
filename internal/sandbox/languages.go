@@ -17,7 +17,9 @@ func ConfigureDefaultLanguages(cfg *Config) {
 			SrcName:        "main.go",
 			ExeName:        "main", 
 			CompileCommand: "go build -ldflags \"-s -w\" -o {{EXE_PATH}} {{SRC_PATH}}",
-			TimeoutSec:     DefaultCompileTimeLimitSec,
+			// A fresh isolated UID uses a private Go build cache. Two cold
+			// compiles sharing a 2-CPU worker can legitimately exceed 30s.
+			TimeoutSec: 90,
 		},
 		Run: RunConfig{
 			Command:    "{{EXE_PATH}}",
