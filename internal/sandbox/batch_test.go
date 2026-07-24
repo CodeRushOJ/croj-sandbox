@@ -14,6 +14,15 @@ type batchCommandExecutor struct {
 	inputs  []string
 }
 
+func TestBatchWallClockLimit(t *testing.T) {
+	if got, want := batchWallClockLimit(10*time.Second, 3*time.Second, 2), 21*time.Second; got != want {
+		t.Fatalf("small batch wall clock = %v, want %v", got, want)
+	}
+	if got, want := batchWallClockLimit(10*time.Second, 30*time.Second, 256), 5*time.Minute; got != want {
+		t.Fatalf("large batch wall clock = %v, want %v", got, want)
+	}
+}
+
 func TestRunBatchStopsOnTokenHashMismatchWithoutRawExpectedOutput(t *testing.T) {
 	cfg := Config{
 		HostTempDir:               t.TempDir(),

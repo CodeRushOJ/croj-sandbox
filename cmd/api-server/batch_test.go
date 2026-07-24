@@ -6,16 +6,14 @@ import (
 
 	"github.com/CodeRushOJ/croj-sandbox/internal/sandbox"
 	pb "github.com/CodeRushOJ/croj-sandbox/proto"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 )
 
 type batchAPIStub struct {
 	requests []sandbox.BatchRequest
 }
 
-func TestExecuteBatchV1RejectsWhenWholeBatchSlotIsUnavailable(t *testing.T) {
+func TestExecuteBatchV1DoesNotAcquireSecondAdmissionSlot(t *testing.T) {
 	api := &batchAPIStub{}
 	limiter, err := newExecutionLimiter(1)
 	if err != nil {
@@ -27,16 +25,17 @@ func TestExecuteBatchV1RejectsWhenWholeBatchSlotIsUnavailable(t *testing.T) {
 	}
 	defer release()
 	service := &server{api: api, supportedLangs: []string{"go"}, limiter: limiter}
+	stream := &batchEventStream{ctx: context.Background()}
 	err = service.ExecuteBatchV1(&pb.ExecuteBatchV1Request{
 		Language: "go",
 		Cases:    []*pb.ExecuteBatchV1Case{{CaseId: "case-1"}},
-	}, &batchEventStream{ctx: context.Background()})
-	if status.Code(err) != codes.ResourceExhausted || len(api.requests) != 0 {
-		t.Fatalf("error=%v API calls=%d", err, len(api.requests))
+	}, stream)
+	if err != nil || len(api.requests) != 1 {
+		t.Fatalf("error=%v API calls=%d, want success with one API call", err, len(api.requests))
 	}
 }
 
-func (api *batchAPIStub) Execute(sandbox.Request) sandbox.Response {
+func (api *batchAPIStub) ExecuteContext(context.Context, sandbox.Request) sandbox.Response {
 	return sandbox.Response{Status: string(sandbox.StatusAccepted)}
 }
 

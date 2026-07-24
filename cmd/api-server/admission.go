@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	pb "github.com/CodeRushOJ/croj-sandbox/proto"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -95,4 +96,23 @@ func recoveryStreamServerInterceptor(
 		}
 	}()
 	return handler(srv, stream)
+}
+
+func batchAdmissionStreamInterceptor(limiter *executionLimiter) grpc.StreamServerInterceptor {
+	return func(
+		srv any,
+		stream grpc.ServerStream,
+		info *grpc.StreamServerInfo,
+		handler grpc.StreamHandler,
+	) error {
+		if info.FullMethod != pb.SandboxService_ExecuteBatchV1_FullMethodName {
+			return handler(srv, stream)
+		}
+		release, admitted := limiter.tryAcquire()
+		if !admitted {
+			return status.Error(codes.ResourceExhausted, "sandbox execution capacity exhausted")
+		}
+		defer release()
+		return handler(srv, stream)
+	}
 }

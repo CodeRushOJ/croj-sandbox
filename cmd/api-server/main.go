@@ -33,7 +33,7 @@ var (
 )
 
 type sandboxExecutor interface {
-	Execute(sandbox.Request) sandbox.Response
+	ExecuteContext(context.Context, sandbox.Request) sandbox.Response
 }
 
 type sandboxBatchExecutor interface {
@@ -53,10 +53,18 @@ func newGRPCServer(api sandboxExecutor, supportedLangs []string, concurrency int
 	if err != nil {
 		return nil, nil, err
 	}
+	codec, err := newRequestLimitCodec()
+	if err != nil {
+		return nil, nil, err
+	}
 	grpcServer := grpc.NewServer(
 		grpc.UnaryInterceptor(recoveryUnaryServerInterceptor),
-		grpc.StreamInterceptor(recoveryStreamServerInterceptor),
+		grpc.ChainStreamInterceptor(
+			recoveryStreamServerInterceptor,
+			batchAdmissionStreamInterceptor(limiter),
+		),
 		grpc.MaxRecvMsgSize(maxBatchMessageBytesV1),
+		grpc.ForceServerCodecV2(codec),
 	)
 	pb.RegisterSandboxServiceServer(grpcServer, &server{
 		api:            api,
@@ -74,6 +82,9 @@ func newGRPCServer(api sandboxExecutor, supportedLangs []string, concurrency int
 func (s *server) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb.ExecuteResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
+	}
+	if err := validateExecutePayload(req); err != nil {
+		return nil, err
 	}
 
 	// 验证语言是否支持
@@ -157,7 +168,10 @@ func (s *server) Execute(ctx context.Context, req *pb.ExecuteRequest) (*pb.Execu
 	// Timeout 和 MemoryLimit 在 sandbox.API.Execute 中会根据 cfg 和请求中的值决定
 
 	// 执行代码
-	resp := s.api.Execute(sandboxReq)
+	resp := s.api.ExecuteContext(ctx, sandboxReq)
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 
 	// 转换 sandbox 响应为 gRPC 响应
 	grpcResp := &pb.ExecuteResponse{
@@ -185,11 +199,8 @@ func (s *server) ExecuteBatchV1(req *pb.ExecuteBatchV1Request, stream pb.Sandbox
 	if err := ctx.Err(); err != nil {
 		return status.FromContextError(err).Err()
 	}
-	if req == nil || len(req.Cases) == 0 {
-		return status.Error(codes.InvalidArgument, "batch cases are required")
-	}
-	if len(req.Cases) > maxBatchCasesV1 {
-		return status.Errorf(codes.InvalidArgument, "batch has %d cases; maximum is %d", len(req.Cases), maxBatchCasesV1)
+	if err := validateBatchPayload(req); err != nil {
+		return err
 	}
 	language := req.Language
 	if language == "" {
@@ -237,11 +248,6 @@ func (s *server) ExecuteBatchV1(req *pb.ExecuteBatchV1Request, stream pb.Sandbox
 	if !ok {
 		return status.Error(codes.Unimplemented, "batch execution is not available")
 	}
-	release, admitted := s.limiter.tryAcquire()
-	if !admitted {
-		return status.Error(codes.ResourceExhausted, "sandbox execution capacity exhausted")
-	}
-	defer release()
 
 	var timeoutValue, memoryValue *int
 	if req.Timeout > 0 {
@@ -388,9 +394,13 @@ func main() {
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		<-sigChan
 		log.Println("接收到关闭信号，停止 gRPC 服务...")
-		healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
-		grpcServer.GracefulStop()
-		log.Println("gRPC 服务已成功关闭")
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		if boundedShutdown(shutdownContext, healthServer, grpcServer) {
+			log.Println("gRPC 服务已优雅关闭")
+			return
+		}
+		log.Println("gRPC 优雅关闭超过 25 秒，已强制停止")
 	}()
 
 	if err := grpcServer.Serve(lis); err != nil {

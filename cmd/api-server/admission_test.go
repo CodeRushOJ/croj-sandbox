@@ -186,6 +186,133 @@ func TestCanceledRequestDoesNotCallExecutor(t *testing.T) {
 	}
 }
 
+func TestGRPCExecutePropagatesCancellation(t *testing.T) {
+	api := &contextObservingSandboxAPI{
+		started:  make(chan struct{}),
+		canceled: make(chan struct{}),
+	}
+	service := newTestSandboxService(t, api, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := service.Execute(ctx, validExecuteRequest())
+		result <- err
+	}()
+	select {
+	case <-api.started:
+	case err := <-result:
+		t.Fatalf("Execute returned before context-aware API started: %v", err)
+	}
+	cancel()
+	if err := <-result; status.Code(err) != codes.Canceled {
+		t.Fatalf("Execute code = %s, want %s", status.Code(err), codes.Canceled)
+	}
+	<-api.canceled
+	if calls := api.legacyCalls.Load(); calls != 0 {
+		t.Fatalf("legacy Execute calls = %d, want 0", calls)
+	}
+}
+
+type contextObservingSandboxAPI struct {
+	started     chan struct{}
+	canceled    chan struct{}
+	legacyCalls atomic.Int64
+}
+
+func (api *contextObservingSandboxAPI) Execute(sandbox.Request) sandbox.Response {
+	api.legacyCalls.Add(1)
+	return sandbox.Response{Status: string(sandbox.StatusAccepted)}
+}
+
+func (api *contextObservingSandboxAPI) ExecuteContext(ctx context.Context, _ sandbox.Request) sandbox.Response {
+	close(api.started)
+	<-ctx.Done()
+	close(api.canceled)
+	return sandbox.Response{Status: string(sandbox.StatusSandboxError), Error: ctx.Err().Error()}
+}
+
+func TestBatchAdmissionRejectsBeforeHandlerAndRecvMsg(t *testing.T) {
+	limiter, err := newExecutionLimiter(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, admitted := limiter.tryAcquire()
+	if !admitted {
+		t.Fatal("failed to occupy execution slot")
+	}
+	defer release()
+
+	stream := &recvCountingServerStream{ServerStream: &batchEventStream{ctx: context.Background()}}
+	var handlerCalls atomic.Int64
+	err = batchAdmissionStreamInterceptor(limiter)(
+		nil,
+		stream,
+		&grpc.StreamServerInfo{
+			FullMethod:     pb.SandboxService_ExecuteBatchV1_FullMethodName,
+			IsServerStream: true,
+		},
+		func(any, grpc.ServerStream) error {
+			handlerCalls.Add(1)
+			return stream.RecvMsg(&pb.ExecuteBatchV1Request{})
+		},
+	)
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("interceptor code = %s, want %s", status.Code(err), codes.ResourceExhausted)
+	}
+	if got := handlerCalls.Load(); got != 0 {
+		t.Fatalf("handler calls = %d, want 0", got)
+	}
+	if got := stream.recvCalls.Load(); got != 0 {
+		t.Fatalf("RecvMsg calls = %d, want 0", got)
+	}
+}
+
+func TestNonExecutionStreamsBypassBatchAdmission(t *testing.T) {
+	limiter, err := newExecutionLimiter(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, admitted := limiter.tryAcquire()
+	if !admitted {
+		t.Fatal("failed to occupy execution slot")
+	}
+	defer release()
+
+	for _, method := range []string{
+		"/grpc.health.v1.Health/Watch",
+		"/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
+	} {
+		t.Run(method, func(t *testing.T) {
+			handlerCalls := 0
+			err := batchAdmissionStreamInterceptor(limiter)(
+				nil,
+				&batchEventStream{ctx: context.Background()},
+				&grpc.StreamServerInfo{FullMethod: method},
+				func(any, grpc.ServerStream) error {
+					handlerCalls++
+					return nil
+				},
+			)
+			if err != nil {
+				t.Fatalf("non-execution stream rejected: %v", err)
+			}
+			if handlerCalls != 1 {
+				t.Fatalf("handler calls = %d, want 1", handlerCalls)
+			}
+		})
+	}
+}
+
+type recvCountingServerStream struct {
+	grpc.ServerStream
+	recvCalls atomic.Int64
+}
+
+func (stream *recvCountingServerStream) RecvMsg(any) error {
+	stream.recvCalls.Add(1)
+	return nil
+}
+
 func TestGracefulStopRejectsNewRPCsAndWaitsForAdmittedExecution(t *testing.T) {
 	executor := newBlockingExecutor()
 	grpcServer, _, err := newGRPCServer(executor, []string{"go"}, 1)
@@ -279,7 +406,7 @@ func newBlockingExecutor() *blockingExecutor {
 	}
 }
 
-func (e *blockingExecutor) Execute(sandbox.Request) sandbox.Response {
+func (e *blockingExecutor) ExecuteContext(context.Context, sandbox.Request) sandbox.Response {
 	e.calls.Add(1)
 	active := e.active.Add(1)
 	for {
@@ -298,7 +425,7 @@ type panicOnceExecutor struct {
 	calls atomic.Int64
 }
 
-func (e *panicOnceExecutor) Execute(sandbox.Request) sandbox.Response {
+func (e *panicOnceExecutor) ExecuteContext(context.Context, sandbox.Request) sandbox.Response {
 	if e.calls.Add(1) == 1 {
 		panic("test panic")
 	}

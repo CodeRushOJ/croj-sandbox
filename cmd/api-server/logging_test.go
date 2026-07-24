@@ -25,7 +25,7 @@ type payloadReturningAPI struct {
 	t *testing.T
 }
 
-func (a payloadReturningAPI) Execute(req sandbox.Request) sandbox.Response {
+func (a payloadReturningAPI) ExecuteContext(_ context.Context, req sandbox.Request) sandbox.Response {
 	a.t.Helper()
 	if req.SourceCode != grpcSentinelSource || req.Stdin == nil || *req.Stdin != grpcSentinelStdin || req.ExpectedOutput == nil || *req.ExpectedOutput != grpcSentinelExpected {
 		a.t.Fatalf("gRPC payload mapping changed: %#v", req)

@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+const maxBatchWallClock = 5 * time.Minute
+
 type BatchCaseRequest struct {
 	ID                  string
 	Stdin               string
@@ -59,7 +61,7 @@ func (api *SandboxAPI) ExecuteBatch(
 	if customConfig.CompileTimeout > 0 {
 		compileTimeout = customConfig.CompileTimeout
 	}
-	batchTimeout := compileTimeout + time.Duration(len(request.Cases))*execTimeout + 5*time.Second
+	batchTimeout := batchWallClockLimit(compileTimeout, execTimeout, len(request.Cases))
 	batchContext, cancel := context.WithTimeout(ctx, batchTimeout)
 	defer cancel()
 
@@ -85,6 +87,11 @@ func (api *SandboxAPI) ExecuteBatch(
 		},
 	)
 	return responseFromResult(result)
+}
+
+func batchWallClockLimit(compileTimeout, executeTimeout time.Duration, cases int) time.Duration {
+	calculated := compileTimeout + time.Duration(cases)*executeTimeout + 5*time.Second
+	return min(calculated, maxBatchWallClock)
 }
 
 func responseFromResult(result Result) Response {

@@ -57,6 +57,11 @@ func NewSandboxAPIWithConfig(cfg Config) (*SandboxAPI, error) {
 
 // Execute runs the provided code and returns the result
 func (api *SandboxAPI) Execute(req Request) Response {
+	return api.ExecuteContext(context.Background(), req)
+}
+
+// ExecuteContext runs the provided code and propagates caller cancellation and deadlines.
+func (api *SandboxAPI) ExecuteContext(parent context.Context, req Request) Response {
 	// Set default language if not specified
 	language := req.Language
 	if language == "" {
@@ -64,7 +69,6 @@ func (api *SandboxAPI) Execute(req Request) Response {
 	}
 
 	// Apply custom timeout if provided
-	ctx := context.Background()
 	var execTimeout time.Duration
 
 	// 检查语言配置是否存在
@@ -101,7 +105,8 @@ func (api *SandboxAPI) Execute(req Request) Response {
 		}
 	}
 
-	// 创建新的配置副本，而不是修改原始配置
+	// 创建新的配置副本，而不是修改原始配置。复制完整配置可以保留
+	// fail-closed launcher、cgroup 和后续新增的安全字段。
 	customCfg := api.cfg
 	customCfg.DefaultExecuteTimeLimit = execTimeout
 	customCfg.DefaultExecuteMemoryLimit = memoryLimit
@@ -113,7 +118,7 @@ func (api *SandboxAPI) Execute(req Request) Response {
 	if api.cfg.CompileTimeout > 0 {
 		compileTimeout = api.cfg.CompileTimeout
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), compileTimeout+execTimeout+5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, compileTimeout+execTimeout+5*time.Second)
 	defer cancel()
 
 	// 运行代码（使用修改后的配置）
