@@ -15,11 +15,11 @@ import (
 
 // ProcessStats 存储进程的资源使用情况
 type ProcessStats struct {
-	PID        int   // 进程ID
-	MemoryKB   int64 // 内存使用（KB）
-	CPUTimeMS  int64 // CPU使用时间（毫秒）
-	IsExceeded bool  // 是否超过内存限制
-	IsTimeout  bool  // 是否超时
+	PID        int           // 进程ID
+	MemoryKB   int64         // 内存使用（KB）
+	CPUTimeMS  int64         // CPU使用时间（毫秒）
+	IsExceeded bool          // 是否超过内存限制
+	IsTimeout  bool          // 是否超时
 	Duration   time.Duration // 执行时长
 }
 
@@ -43,121 +43,152 @@ func MonitorProcess(pid int, memoryLimitKB int64, timeoutDuration time.Duration,
 	}
 
 	DebugLog("开始监控进程 %d，超时设置: %.2f秒", pid, timeoutDuration.Seconds())
-	
+
 	// 创建同步组，确保资源监控正确完成
 	var wg sync.WaitGroup
 	var mutex sync.Mutex
 	startTime := time.Now()
-	
+	monitorFinished := make(chan struct{})
+	var finishOnce sync.Once
+	finished := false
+
+	finishMonitoring := func(updateStats func()) bool {
+		mutex.Lock()
+		defer mutex.Unlock()
+
+		if finished {
+			return false
+		}
+		updateStats()
+		finished = true
+		finishOnce.Do(func() {
+			close(monitorFinished)
+		})
+		return true
+	}
+
 	// 创建独立的计时器用于精确超时控制
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		
-		 // 记录实际启动时间
+
+		// 记录实际启动时间
 		timer := time.NewTimer(timeoutDuration)
 		defer timer.Stop()
-		
+
 		select {
 		case <-timer.C:
-			mutex.Lock()
 			elapsed := time.Since(startTime)
-			InfoLog("进程 %d 超时: %.2f秒 (限制: %.2f秒)", 
+			if !finishMonitoring(func() {
+				stats.IsTimeout = true
+				stats.Duration = elapsed
+			}) {
+				return
+			}
+
+			InfoLog("进程 %d 超时: %.2f秒 (限制: %.2f秒)",
 				pid, elapsed.Seconds(), timeoutDuration.Seconds())
-			stats.IsTimeout = true
-			stats.Duration = elapsed
-			
-			// 强制终止进程树
 			killErr := terminateProcessTree(pid)
 			if killErr != nil {
 				ErrorLog("终止进程 %d 时发生错误: %v", pid, killErr)
 			} else {
 				DebugLog("成功终止进程 %d 和其子进程", pid)
 			}
-			mutex.Unlock()
-			
+
 		case <-done:
-			// 如果通道关闭，退出监控
+			finishMonitoring(func() {
+				stats.Duration = time.Since(startTime)
+			})
+			return
+		case <-monitorFinished:
 			return
 		}
 	}()
-	
+
 	// 使用独立的goroutine监控资源使用
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		
+
 		for {
 			select {
 			case <-ticker.C:
 				mutex.Lock()
-				
-				// 检查是否已超时
-				if stats.IsTimeout {
+
+				// 检查监控是否已由其他goroutine完成
+				if finished {
 					mutex.Unlock()
 					return
 				}
-				
+
 				// 检查进程是否仍在运行
 				if !isProcessRunning(pid) {
 					stats.Duration = time.Since(startTime)
+					finished = true
 					mutex.Unlock()
+					finishOnce.Do(func() {
+						close(monitorFinished)
+					})
 					return
 				}
-				
+
 				// 更新运行时间
 				elapsed := time.Since(startTime)
 				stats.Duration = elapsed
-				
-				 // 定期记录进程状态
-				if DebugMode && int(elapsed.Seconds()) > 0 && 
-				   int(elapsed.Seconds()) % 1 == 0 && 
-				   int(elapsed.Seconds()) != int((elapsed - interval).Seconds()) {
-					DebugLog("进程 %d 已运行: %.1f秒 (限制: %.1f秒)", 
+
+				// 定期记录进程状态
+				if DebugMode && int(elapsed.Seconds()) > 0 &&
+					int(elapsed.Seconds())%1 == 0 &&
+					int(elapsed.Seconds()) != int((elapsed-interval).Seconds()) {
+					DebugLog("进程 %d 已运行: %.1f秒 (限制: %.1f秒)",
 						pid, elapsed.Seconds(), timeoutDuration.Seconds())
 				}
-				
-				 // 监控内存使用
+
+				// 监控内存使用
 				memKB, err := getProcessAndChildrenMemoryKB(pid)
 				if err == nil && memKB > stats.MemoryKB {
 					stats.MemoryKB = memKB
-					
+
 					// 仅在调试模式下记录内存使用情况
-					if DebugMode && int(elapsed.Seconds()) > 0 && int(elapsed.Seconds()) % 2 == 0 &&
-					   int(elapsed.Seconds()) != int((elapsed - interval).Seconds()) {
-						DebugLog("进程 %d 内存使用: %d KB (%.2f MB)", 
+					if DebugMode && int(elapsed.Seconds()) > 0 && int(elapsed.Seconds())%2 == 0 &&
+						int(elapsed.Seconds()) != int((elapsed-interval).Seconds()) {
+						DebugLog("进程 %d 内存使用: %d KB (%.2f MB)",
 							pid, memKB, float64(memKB)/1024)
 					}
 				}
-				
+
 				// 检查内存限制
 				if memoryLimitKB > 0 && stats.MemoryKB > memoryLimitKB {
-					InfoLog("进程 %d 内存超限: %d KB > %d KB", 
+					InfoLog("进程 %d 内存超限: %d KB > %d KB",
 						pid, stats.MemoryKB, memoryLimitKB)
 					stats.IsExceeded = true
-					_ = terminateProcessTree(pid)
+					finished = true
 					mutex.Unlock()
+					finishOnce.Do(func() {
+						close(monitorFinished)
+					})
+					_ = terminateProcessTree(pid)
 					return
 				}
-				
+
 				mutex.Unlock()
-				
+
 			case <-done:
-				mutex.Lock()
-				stats.Duration = time.Since(startTime)
-				mutex.Unlock()
+				finishMonitoring(func() {
+					stats.Duration = time.Since(startTime)
+				})
+				return
+			case <-monitorFinished:
 				return
 			}
 		}
 	}()
-	
+
 	// 等待所有监控goroutine完成
-	go func() {
-		wg.Wait()
-		DebugLog("进程 %d 的监控任务已完成", pid)
-	}()
+	wg.Wait()
+	DebugLog("进程 %d 的监控任务已完成", pid)
 
 	return stats
 }
@@ -168,7 +199,7 @@ func isProcessRunning(pid int) bool {
 	if err != nil {
 		return false
 	}
-	
+
 	// 尝试发送空信号检查进程是否存在
 	err = proc.Signal(syscall.Signal(0))
 	return err == nil
@@ -180,7 +211,7 @@ func terminateProcessTree(pid int) error {
 	children, err := getChildProcesses(pid)
 	if err == nil && len(children) > 0 {
 		log.Printf("找到 %d 个子进程需要终止", len(children))
-		
+
 		// 终止所有子进程
 		for _, childPid := range children {
 			proc, err := os.FindProcess(childPid)
@@ -189,7 +220,7 @@ func terminateProcessTree(pid int) error {
 				if err := proc.Kill(); err != nil {
 					log.Printf("无法终止子进程 %d: %v", childPid, err)
 				}
-				
+
 				// 在Unix系统上使用SIGKILL确保终止
 				if runtime.GOOS != "windows" {
 					_ = proc.Signal(syscall.SIGKILL)
@@ -197,23 +228,23 @@ func terminateProcessTree(pid int) error {
 			}
 		}
 	}
-	
+
 	// 最后终止主进程
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return fmt.Errorf("找不到进程 %d: %w", pid, err)
 	}
-	
+
 	log.Printf("终止主进程: %d", pid)
 	if err := proc.Kill(); err != nil {
 		return fmt.Errorf("终止进程 %d 失败: %w", pid, err)
 	}
-	
+
 	// 在Unix系统上使用SIGKILL确保终止
 	if runtime.GOOS != "windows" {
 		_ = proc.Signal(syscall.SIGKILL)
 	}
-	
+
 	return nil
 }
 
@@ -312,7 +343,7 @@ func getProcessAndChildrenMemoryKB(pid int) (int64, error) {
 	if err != nil {
 		return -1, err
 	}
-	
+
 	// 如果是Java或Python等解释型语言，尝试查找子进程
 	children, err := getChildProcesses(pid)
 	if err == nil && len(children) > 0 {
@@ -324,14 +355,14 @@ func getProcessAndChildrenMemoryKB(pid int) (int64, error) {
 			}
 		}
 	}
-	
+
 	return memKB, nil
 }
 
 // getChildProcesses 获取指定进程的所有子进程ID
 func getChildProcesses(pid int) ([]int, error) {
 	var children []int
-	
+
 	switch runtime.GOOS {
 	case "linux":
 		// 在Linux上使用/proc文件系统
@@ -339,7 +370,7 @@ func getChildProcesses(pid int) ([]int, error) {
 		if err != nil {
 			return nil, err
 		}
-		
+
 		for _, file := range files {
 			// 如果是数字，可能是进程ID目录
 			if file.IsDir() {
@@ -360,7 +391,7 @@ func getChildProcesses(pid int) ([]int, error) {
 				}
 			}
 		}
-		
+
 	case "darwin", "windows":
 		// 在macOS和Windows上使用ps命令
 		var cmd *exec.Cmd
@@ -369,12 +400,12 @@ func getChildProcesses(pid int) ([]int, error) {
 		} else {
 			cmd = exec.Command("wmic", "process", "where", fmt.Sprintf("ParentProcessId=%d", pid), "get", "ProcessId")
 		}
-		
+
 		output, err := cmd.Output()
 		if err != nil {
 			return nil, err
 		}
-		
+
 		lines := strings.Split(string(output), "\n")
 		for _, line := range lines {
 			line = strings.TrimSpace(line)
@@ -386,7 +417,7 @@ func getChildProcesses(pid int) ([]int, error) {
 			}
 		}
 	}
-	
+
 	return children, nil
 }
 
