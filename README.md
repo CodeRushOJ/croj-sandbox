@@ -60,9 +60,9 @@ service SandboxService {
 
 Batch V1 保留 64 MiB protobuf 接收上限，并额外限制聚合 payload（源码、全部 case ID、stdin、expected output 和 token digest）不超过 64 MiB。请求必须包含 1..256 个唯一非空 `case_id`；每个 `case_id` 不超过 256 字节，源码、每个 stdin 和每个 expected output 分别不超过 4 MiB。超出字节数或 case 数返回 `ResourceExhausted`；空/重复 ID、无效 token digest 等格式错误返回 `InvalidArgument`。judging-server 会在 RPC 前做同样的确定性检查。旧 `Execute` 不变，旧客户端可继续使用；judging-server 批量客户端必须和本版本同时发布。
 
-编译产物仅在单个 RPC 的私有临时目录中存在，不跨提交缓存。RPC 正常结束、编译失败、发送失败和 context 取消都清理源码及产物。整个 batch 只占一个 `max-concurrency` slot，满载仍在编译前返回 `ResourceExhausted`。
+编译产物仅在单个 RPC 的私有临时目录中存在，不跨提交缓存。RPC 正常结束、编译失败、发送失败和 context 取消都会对请求 cgroup 写入 `cgroup.kill=1`，等待 `cgroup.events` 报告 `populated=0` 后再删除目录，因此父进程退出后遗留的 daemon 子进程也不会逃逸。整个 batch 只占一个 `max-concurrency` slot，满载仍在编译前返回 `ResourceExhausted`。
 
-Batch 总墙钟预算按“编译预算 + case 数 × 单 case 执行预算 + 5 秒”计算，但硬性夹到最多 5 分钟，避免 256 个 case 把单个 RPC 延长到数小时。客户端取消和 deadline 通过 `SandboxAPI.ExecuteContext` 贯穿编译、执行与 batch 生命周期；旧的进程内 `Execute` 方法仅作为 background-context 兼容包装。
+Unary 和 Batch 的外层墙钟都使用所选语言的真实编译预算；Go 冷编译为 240 秒，不会再被旧的 30 秒兼容字段提前截断，也覆盖 1 GiB 隔离 worker 上观测到超过 90 秒的合法冷构建。Batch 总墙钟预算按“编译预算 + case 数 × 单 case 执行预算 + 5 秒”计算，unary 按“编译预算 + 执行预算 + 5 秒”计算，两者都硬性夹到最多 5 分钟。客户端取消和 deadline 通过 `SandboxAPI.ExecuteContext` 贯穿编译、执行与 batch 生命周期；旧的进程内 `Execute` 方法仅作为 background-context 兼容包装。
 
 编译 stdout/stderr 分别受现有 64 KiB 上限约束，失败响应只在 `compile_error` 携带一次有界诊断；错误分类字段不复制诊断，避免恶意编译输出放大内存和 gRPC 响应。
 
@@ -80,7 +80,7 @@ API Server 使用命令行参数：
 | `-languages` | `go,cpp,python,java,javascript` | 允许的语言列表 |
 | `-max-concurrency` | 当前进程 `GOMAXPROCS`，至少为 `1` | 每个 Pod 同时进行的编译/执行数，显式值必须大于 `0` |
 
-默认编译超时为 30 秒；Go 因独立 UID、私有构建缓存以及同一 worker 上的并发冷编译使用 90 秒预算。编译器使用独立的 1 GiB cgroup 内存预算，不受题目运行内存限制影响；参赛程序默认限制仍为 512 MiB。stdout 与 stderr 各限制 64 KiB。请求可以缩短或调整执行限制；运行内存请求上限由服务端限制为 4 GiB。
+默认编译超时为 30 秒；Go 因独立 UID、私有构建缓存和 1 GiB compiler cgroup 使用 240 秒预算。编译器使用独立的 1 GiB cgroup 内存预算，不受题目运行内存限制影响；参赛程序默认限制仍为 512 MiB，显式请求的 64 MiB、1 GiB 等限制会原样应用到每个 batch case。stdout 与 stderr 各限制 64 KiB。运行内存请求的服务端硬上限为 1 GiB，与 2 GiB Pod limit 和单并发部署共同为 supervisor、工具链辅助进程及 page cache 保留余量。
 
 ### 并发与背压
 
@@ -96,7 +96,7 @@ API Server 使用命令行参数：
 
 服务记录结构化键值 `max_concurrency`、`in_flight` 和进程生命周期内累计的 `rejected_total`，不记录源码、stdin 或预期输出。judging-server 应把 `ResourceExhausted` 作为容量信号，选择其他 Ready Endpoint 或做有上限的抖动退避；不得无限即时重试同一 Pod。
 
-默认值取 Go 运行时当前可用并行 CPU。Kubernetes 部署应结合容器 CPU limit 显式设置，例如 2 CPU limit 使用 `-max-concurrency=2`；编译器内存峰值较大时应进一步降低，而不是只扩大队列。
+默认值取 Go 运行时当前可用并行 CPU，但 Kubernetes 部署必须结合内存预算显式设置。本仓 2 GiB Pod 使用 `-max-concurrency=1`：任一时刻只允许一个最高 1 GiB 的编译器或参赛程序 cgroup，并把其余内存留给 API supervisor、语言工具链辅助进程和 page cache。不能仅按 2 CPU 把并发提高到 2，否则两个 1 GiB 请求没有可兑现的 Pod 余量。
 
 收到终止信号后，服务先把 health 改为 `NOT_SERVING`，再调用 `grpc.GracefulStop` 停止接受新 RPC 并等待已 admission 的执行完成。drain 最多等待 25 秒，随后调用 `grpc.Stop` 强制终止仍未完成的 RPC；这为 Pod 的 30 秒 `terminationGracePeriodSeconds` 预留 5 秒进程/容器清理余量。对应单元测试用可控 context 验证顺序、优雅完成与超时强停，不依赖 sleep 时序。
 
@@ -201,11 +201,11 @@ spec:
 
 `deploy/deployment.yaml` 使用 `coderushoj/croj-sandbox:dev`，只面向本机 Kind；正式镜像版本和生产级工作负载仍需在 `croj-platform` Helm chart 中完成安全加固后发布。`croj-judging-server` 只需要 EndpointSlice 的 `list` 权限，不需要访问 Pod 或 Kubernetes Endpoints API。
 
-平台 Helm follow-up：在 `sandbox.args` 的 nsenter 分隔符和 `/app/api-server` 之后追加 `-max-concurrency=N`，并让 `N` 与 sandbox Pod 的 CPU/内存 limit、语言工具链峰值和期望并行度一致。参数缺失时使用运行时 CPU 默认值；`0` 或负数会使 API Server 启动失败，避免无界或含糊配置。Pod termination grace 不应低于 30 秒：服务内固定使用其中最多 25 秒 drain，剩余时间留给 kubelet 和容器运行时完成退出。
+平台 Helm follow-up：在 `sandbox.args` 的 nsenter 分隔符和 `/app/api-server` 之后追加 `-max-concurrency=N`，并让 `N × 1 GiB` 低于 sandbox Pod memory limit，明确保留 supervisor 与 page cache 余量；当前 2 GiB Pod 必须使用 `N=1`。参数缺失时使用运行时 CPU 默认值；`0` 或负数会使 API Server 启动失败，避免无界或含糊配置。Pod termination grace 不应低于 30 秒：服务内固定使用其中最多 25 秒 drain，剩余时间留给 kubelet 和容器运行时完成退出。
 
 ## 安全边界
 
-当前实现已经有限时、限输出、进程数、内存监控、统一 cgroup v2、独立运行 UID、子进程 seccomp、环境清洗和 socket 禁用。launcher 在执行目标命令前等待 supervisor 完成 cgroup 放置；之后降权、设置 `no_new_privs`、加载 seccomp，再通过 `execve` 进入编译器或用户程序。仍有以下纵深防御事项：
+当前实现已经有限时、限输出、进程数、内存监控、统一 cgroup v2、独立运行 UID、子进程 seccomp、环境清洗和 socket 禁用。launcher 在执行目标命令前等待 supervisor 完成 cgroup 放置；之后降权、设置 `no_new_privs`、加载 seccomp，再通过 `execve` 进入编译器或用户程序。seccomp 同时拒绝 `io_uring_setup/register/enter`，阻断通过 `IORING_OP_SOCKET` 绕过常规 `socket` syscall 规则。仍有以下纵深防御事项：
 
 - 编译器与用户程序运行在同一个专用沙箱 Pod，但使用不同的请求进程、UID 和 cgroup
 - 文件系统与网络命名空间尚未形成完整隔离边界

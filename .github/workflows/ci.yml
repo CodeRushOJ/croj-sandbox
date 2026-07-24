@@ -35,6 +35,21 @@ jobs:
           CGO_ENABLED=1 go build -trimpath -o /tmp/simple-client ./cmd/simple-client
       - name: Build container image
         run: docker build -t coderushoj/croj-sandbox:ci .
+      - name: Run privileged isolation tests in final image
+        run: |
+          CGO_ENABLED=1 go test -c -o /tmp/croj-sandbox-integration.test ./internal/sandbox
+          docker run --rm \
+            --privileged \
+            --cgroupns=host \
+            --pid=host \
+            -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            -v /tmp/croj-sandbox-integration.test:/tmp/croj-sandbox-integration.test:ro \
+            -e CROJ_RUN_EXECUTOR_ISOLATION_TEST=1 \
+            -e CROJ_TEST_SANDBOX_EXEC=/app/sandbox-exec \
+            -e CROJ_SANDBOX_INSTANCE_ID=ci-${{ github.run_id }}-${{ github.run_attempt }} \
+            --entrypoint /tmp/croj-sandbox-integration.test \
+            coderushoj/croj-sandbox:ci \
+            -test.v -test.count=1 -test.run='^TestPrivilegedLinux'
       - name: Verify language toolchains
         run: |
           docker run --rm --entrypoint sh coderushoj/croj-sandbox:ci -ec '

@@ -26,7 +26,7 @@
 
 ### Changed
 
-- Kind 开发 Deployment 按 2 CPU limit 显式设置 `-max-concurrency=2`
+- Kind 开发 Deployment 在 2 GiB Pod limit 下显式设置 `-max-concurrency=1`，与 1 GiB compiler/runtime 上限对齐并保留 supervisor/page cache 余量
 - Batch V1 admission 移到 stream interceptor，在 generated handler `RecvMsg` 前拒绝满载请求；health/reflection 不占执行 slot
 - 删除 ZooKeeper 注册与客户端发现，调度统一交给 Kubernetes EndpointSlice
 - cgroup v2 在父级正确委派 memory/cpu/pids controller，并按 Pod UID 隔离 cgroup 名称
@@ -38,7 +38,13 @@
 
 ### Fixed
 
-- 将默认编译预算提高到 30 秒，并为 Go 并发冷编译提供 90 秒预算，避免独立 UID 与私有构建缓存下的合法编译被误判为超时
+- 退出和取消路径使用 `cgroup.kill` 清理整个请求进程树，等待 `populated=0` 后删除 cgroup，避免父进程退出后 daemon 子进程逃逸
+- seccomp 拒绝 `io_uring_setup/register/enter`，阻断 `IORING_OP_SOCKET` 绕过禁网策略
+- unary/batch 外层 deadline 改用语言编译预算并受 5 分钟服务端上限约束，Go 240 秒冷编译不再被 30/90 秒提前截断
+- Batch 每个 case 保留请求的运行内存限制，API 上限收紧为 Pod 可兑现的 1 GiB
+- Pod cgroup 迁移安全忽略已退出 PID 的 `ESRCH` 并重新核验 membership，其他写错误继续 fail-closed
+- CI 在最终镜像中以 privileged、host cgroup/PID namespace 真正运行 cgroup 进程树清理和禁网集成测试
+- 将默认编译预算提高到 30 秒，并为 Go 隔离冷编译提供 240 秒预算，覆盖 1 GiB worker 上观测到超过 90 秒的合法构建
 - 将编译器的 1 GiB 内存预算与参赛程序运行内存拆分，避免低内存题目或新版工具链在编译阶段被 cgroup OOM 杀死
 - 修复进程监控在后台 goroutine 仍写入统计数据时提前返回导致的竞态，并确保自然退出、超时和取消路径均返回最终快照
 - 修复 seccomp 曾在 API Server 线程而非目标子进程中加载、初始化失败仍继续执行的问题

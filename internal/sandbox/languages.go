@@ -15,11 +15,12 @@ func ConfigureDefaultLanguages(cfg *Config) {
 	cfg.Languages["go"] = LanguageConfig{
 		Compile: CompileConfig{
 			SrcName:        "main.go",
-			ExeName:        "main", 
+			ExeName:        "main",
 			CompileCommand: "go build -ldflags \"-s -w\" -o {{EXE_PATH}} {{SRC_PATH}}",
 			// A fresh isolated UID uses a private Go build cache. Two cold
-			// compiles sharing a 2-CPU worker can legitimately exceed 30s.
-			TimeoutSec: 90,
+			// compiles can exceed 90s on a cold 1-GiB worker while remaining
+			// inside the API's five-minute wall-clock ceiling.
+			TimeoutSec: 240,
 		},
 		Run: RunConfig{
 			Command:    "{{EXE_PATH}}",
@@ -48,8 +49,8 @@ func ConfigureDefaultLanguages(cfg *Config) {
 	// Python 3
 	cfg.Languages["python"] = LanguageConfig{
 		Compile: CompileConfig{
-			SrcName:        "main.py",
-			ExeName:        "main.py", // 不编译，直接运行
+			SrcName: "main.py",
+			ExeName: "main.py", // 不编译，直接运行
 		},
 		Run: RunConfig{
 			Command:    "python3 {{SRC_PATH}}",
@@ -63,7 +64,7 @@ func ConfigureDefaultLanguages(cfg *Config) {
 	cfg.Languages["java"] = LanguageConfig{
 		Compile: CompileConfig{
 			SrcName:        "Main.java",
-			ExeName:        "Main.class", 
+			ExeName:        "Main.class",
 			CompileCommand: "javac {{SRC_PATH}}",
 			TimeoutSec:     DefaultCompileTimeLimitSec,
 		},
@@ -78,8 +79,8 @@ func ConfigureDefaultLanguages(cfg *Config) {
 	// JavaScript (Node.js)
 	cfg.Languages["javascript"] = LanguageConfig{
 		Compile: CompileConfig{
-			SrcName:        "main.js",
-			ExeName:        "main.js", // 不编译，直接运行
+			SrcName: "main.js",
+			ExeName: "main.js", // 不编译，直接运行
 		},
 		Run: RunConfig{
 			Command:    "node {{SRC_PATH}}",

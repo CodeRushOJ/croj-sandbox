@@ -1,12 +1,15 @@
 package security
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/CodeRushOJ/croj-sandbox/internal/util"
 )
@@ -249,17 +252,75 @@ func cleanupCgroupV1(manager *CgroupManager) error {
 
 // cleanupCgroupV2 清理cgroup v2资源
 func cleanupCgroupV2(manager *CgroupManager) error {
+	return cleanupCgroupV2WithOps(manager, defaultCgroupFileOps(), 2*time.Second)
+}
+
+type cgroupFileOps struct {
+	writeFile func(string, []byte, os.FileMode) error
+	readFile  func(string) ([]byte, error)
+	remove    func(string) error
+	sleep     func(time.Duration)
+}
+
+func defaultCgroupFileOps() cgroupFileOps {
+	return cgroupFileOps{
+		writeFile: os.WriteFile,
+		readFile:  os.ReadFile,
+		remove:    os.Remove,
+		sleep:     time.Sleep,
+	}
+}
+
+func cleanupCgroupV2WithOps(manager *CgroupManager, ops cgroupFileOps, timeout time.Duration) error {
 	cgroupPath := manager.BasePath
 	if cgroupPath == "" {
 		return fmt.Errorf("cgroup manager path is missing")
 	}
 
-	// 尝试删除目录
-	if err := os.Remove(cgroupPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("清理cgroup v2目录失败: %w", err)
+	if err := ops.writeFile(filepath.Join(cgroupPath, "cgroup.kill"), []byte("1"), 0600); err != nil {
+		return fmt.Errorf("kill request cgroup process tree: %w", err)
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		events, err := ops.readFile(filepath.Join(cgroupPath, "cgroup.events"))
+		if err != nil {
+			return fmt.Errorf("read request cgroup events: %w", err)
+		}
+		populated, err := cgroupPopulated(events)
+		if err != nil {
+			return err
+		}
+		if !populated {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("request cgroup remained populated after kill")
+		}
+		ops.sleep(10 * time.Millisecond)
 	}
 
+	if err := ops.remove(cgroupPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("清理cgroup v2目录失败: %w", err)
+	}
 	return nil
+}
+
+func cgroupPopulated(events []byte) (bool, error) {
+	for _, line := range strings.Split(strings.TrimSpace(string(events)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != "populated" {
+			continue
+		}
+		switch fields[1] {
+		case "0":
+			return false, nil
+		case "1":
+			return true, nil
+		default:
+			return false, fmt.Errorf("invalid populated value in cgroup.events")
+		}
+	}
+	return false, fmt.Errorf("cgroup.events is missing populated state")
 }
 
 var requestCgroupState struct {
@@ -311,10 +372,24 @@ func requestCgroupRoot() (string, error) {
 }
 
 func moveProcessesToSupervisor(podCgroup string, supervisorPath string) error {
+	return moveProcessesToSupervisorWithIO(
+		podCgroup,
+		supervisorPath,
+		os.ReadFile,
+		os.WriteFile,
+	)
+}
+
+func moveProcessesToSupervisorWithIO(
+	podCgroup string,
+	supervisorPath string,
+	readFile func(string) ([]byte, error),
+	writeFile func(string, []byte, os.FileMode) error,
+) error {
 	source := filepath.Join(podCgroup, "cgroup.procs")
 	target := filepath.Join(supervisorPath, "cgroup.procs")
 	for attempt := 0; attempt < 10; attempt++ {
-		processes, err := os.ReadFile(source)
+		processes, err := readFile(source)
 		if err != nil {
 			return fmt.Errorf("read Pod cgroup processes: %w", err)
 		}
@@ -326,7 +401,10 @@ func moveProcessesToSupervisor(podCgroup string, supervisorPath string) error {
 			if _, err := strconv.Atoi(pid); err != nil {
 				return fmt.Errorf("invalid PID in Pod cgroup")
 			}
-			if err := os.WriteFile(target, []byte(pid), 0600); err != nil {
+			if err := writeFile(target, []byte(pid), 0600); err != nil {
+				if errors.Is(err, syscall.ESRCH) {
+					continue
+				}
 				return fmt.Errorf("move PID %s into supervisor cgroup: %w", pid, err)
 			}
 		}

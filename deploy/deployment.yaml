@@ -46,7 +46,9 @@ spec:
             - --cgroup=/proc/1/ns/cgroup
             - --
             - /app/api-server
-            - -max-concurrency=2
+            # One 1Gi compiler/runtime cgroup plus supervisor and page cache
+            # must fit inside this Pod's 2Gi memory limit.
+            - -max-concurrency=1
           env:
             - name: CROJ_SANDBOX_INSTANCE_ID
               valueFrom:

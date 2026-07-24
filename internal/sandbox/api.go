@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+const (
+	maxRequestWallClock        = 5 * time.Minute
+	maxRequestMemoryLimitBytes = int64(1 << 30)
+)
+
 // Request represents a code execution request
 type Request struct {
 	SourceCode     string  `json:"sourceCode"`     // Source code to execute
@@ -93,16 +98,12 @@ func (api *SandboxAPI) ExecuteContext(parent context.Context, req Request) Respo
 
 	// 应用自定义内存限制（如果提供）
 	memoryLimit := api.cfg.DefaultExecuteMemoryLimit
+	userSpecifiedMemoryLimit := false
 	if req.MemoryLimit != nil && *req.MemoryLimit > 0 {
 		// 转换 MB 到 bytes
 		customMemLimit := int64(*req.MemoryLimit) * 1024 * 1024
-		// 不超过合理上限（例如 4GB）
-		if customMemLimit <= 4*1024*1024*1024 {
-			memoryLimit = customMemLimit
-		} else {
-			log.Printf("请求的内存限制 %d MB 超出最大允许值，使用上限 4GB", *req.MemoryLimit)
-			memoryLimit = 4 * 1024 * 1024 * 1024
-		}
+		memoryLimit = min(customMemLimit, maxRequestMemoryLimitBytes)
+		userSpecifiedMemoryLimit = true
 	}
 
 	// 创建新的配置副本，而不是修改原始配置。复制完整配置可以保留
@@ -112,13 +113,13 @@ func (api *SandboxAPI) ExecuteContext(parent context.Context, req Request) Respo
 	customCfg.DefaultExecuteMemoryLimit = memoryLimit
 	customCfg.ExecTimeout = execTimeout
 	customCfg.UserSpecifiedTimeout = userSpecifiedTimeout
+	customCfg.UserSpecifiedMemoryLimit = userSpecifiedMemoryLimit
 
-	// Create context with timeout (估计编译时间+执行时间+额外缓冲)
-	compileTimeout := api.cfg.DefaultCompileTimeLimit
-	if api.cfg.CompileTimeout > 0 {
-		compileTimeout = api.cfg.CompileTimeout
-	}
-	ctx, cancel := context.WithTimeout(parent, compileTimeout+execTimeout+5*time.Second)
+	compileTimeout := compileTimeLimit(api.cfg, language)
+	ctx, cancel := context.WithTimeout(
+		parent,
+		requestWallClockLimit(compileTimeout, execTimeout),
+	)
 	defer cancel()
 
 	// 运行代码（使用修改后的配置）
@@ -139,6 +140,20 @@ func (api *SandboxAPI) ExecuteContext(parent context.Context, req Request) Respo
 	}
 
 	return response
+}
+
+func compileTimeLimit(cfg Config, language string) time.Duration {
+	if langConfig, ok := cfg.Languages[language]; ok {
+		return langConfig.GetCompileTimeout(cfg.DefaultCompileTimeLimit)
+	}
+	if cfg.CompileTimeout > 0 {
+		return cfg.CompileTimeout
+	}
+	return cfg.DefaultCompileTimeLimit
+}
+
+func requestWallClockLimit(compileTimeout, executeTimeout time.Duration) time.Duration {
+	return min(compileTimeout+executeTimeout+5*time.Second, maxRequestWallClock)
 }
 
 // ExecuteJSON accepts a JSON request string and returns a JSON response

@@ -16,12 +16,12 @@ const (
 
 const (
 	// --- Default Execution Limits ---
-	DefaultCompileTimeLimitSec = 30  // Includes cold, isolated toolchain startup.
-	DefaultExecuteTimeLimitSec = 3   // Default execution timeout in seconds
+	DefaultCompileTimeLimitSec  = 30 // Includes cold, isolated toolchain startup.
+	DefaultExecuteTimeLimitSec  = 3  // Default execution timeout in seconds
 	DefaultCompileMemoryLimitMB = 1024
-	DefaultMaxStdoutKB         = 64  // Default max stdout size in KB
-	DefaultMaxStderrKB         = 64  // Default max stderr size in KB
-	DefaultMemoryLimitMB       = 512 // Default memory limit in MB
+	DefaultMaxStdoutKB          = 64  // Default max stdout size in KB
+	DefaultMaxStderrKB          = 64  // Default max stderr size in KB
+	DefaultMemoryLimitMB        = 512 // Default memory limit in MB
 
 	// --- Host Environment ---
 	DefaultHostTempDir     = "/tmp/croj-sandbox-local-runs" // Default host temp directory
@@ -73,8 +73,12 @@ func (lc *LanguageConfig) GetExecuteTimeout(defaultTimeout time.Duration, userSp
 	return time.Duration(lc.Run.TimeoutSec) * time.Second
 }
 
-// GetMemoryLimit returns the memory limit in bytes, using default if not set
-func (lc *LanguageConfig) GetMemoryLimit(defaultLimit int64) int64 {
+// GetMemoryLimit returns the memory limit in bytes, preserving an explicit
+// request value instead of replacing it with the language default.
+func (lc *LanguageConfig) GetMemoryLimit(defaultLimit int64, userSpecified ...bool) int64 {
+	if len(userSpecified) > 0 && userSpecified[0] {
+		return defaultLimit
+	}
 	if lc.Run.MemoryMB <= 0 {
 		return defaultLimit
 	}
@@ -101,7 +105,8 @@ type Config struct {
 	SrcFileName    string        // 兼容字段
 
 	// 是否使用用户指定的超时（优先级高于语言配置）
-	UserSpecifiedTimeout bool
+	UserSpecifiedTimeout     bool
+	UserSpecifiedMemoryLimit bool
 
 	// 安全相关设置
 	Language          string   // 执行的编程语言

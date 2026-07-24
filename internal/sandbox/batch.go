@@ -79,7 +79,10 @@ func (r *Runner) RunBatchWithConfig(
 		return compileResult
 	}
 
-	memLimitBytes := langCfg.GetMemoryLimit(cfg.DefaultExecuteMemoryLimit)
+	memLimitBytes := langCfg.GetMemoryLimit(
+		cfg.DefaultExecuteMemoryLimit,
+		cfg.UserSpecifiedMemoryLimit,
+	)
 	timeoutDuration := langCfg.GetExecuteTimeout(cfg.DefaultExecuteTimeLimit, cfg.UserSpecifiedTimeout)
 	runPlaceholders := map[string]string{
 		PlaceholderExePath:   compiledPath,

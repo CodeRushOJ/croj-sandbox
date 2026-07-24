@@ -2,6 +2,8 @@ package sandbox
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -17,5 +19,19 @@ func TestExecutorFailsClosedWhenSecurityLauncherIsMissing(t *testing.T) {
 
 	if result.Status != StatusSandboxError {
 		t.Fatalf("status = %q, want %q: %+v", result.Status, StatusSandboxError, result)
+	}
+}
+
+func TestCgroupCleanupFailureOverridesAcceptedResult(t *testing.T) {
+	cleanupErr := errors.New("cgroup remained populated")
+	result := resultAfterCgroupCleanup(
+		Result{Status: StatusAccepted, ExitCode: 0},
+		cleanupErr,
+	)
+	if result.Status != StatusSandboxError {
+		t.Fatalf("status = %q, want %q", result.Status, StatusSandboxError)
+	}
+	if !strings.Contains(result.Error, cleanupErr.Error()) {
+		t.Fatalf("cleanup error was not surfaced: %+v", result)
 	}
 }

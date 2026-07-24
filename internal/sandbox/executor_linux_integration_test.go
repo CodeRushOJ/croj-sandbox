@@ -2,11 +2,15 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestPrivilegedLinuxExecutorAppliesChildIsolation(t *testing.T) {
@@ -82,6 +86,57 @@ func TestPrivilegedLinuxExecutorBlocksNetworkSockets(t *testing.T) {
 	)
 	if result.Status != StatusAccepted {
 		t.Fatalf("socket policy was not enforced: %+v", result)
+	}
+}
+
+func TestPrivilegedLinuxExecutorKillsDaemonProcessTreeOnParentExit(t *testing.T) {
+	if os.Getenv("CROJ_RUN_EXECUTOR_ISOLATION_TEST") != "1" {
+		t.Skip("set CROJ_RUN_EXECUTOR_ISOLATION_TEST=1 in the privileged Linux test container")
+	}
+	cfg := DefaultConfig()
+	cfg.Language = "go"
+	cfg.WorkingDir = t.TempDir()
+	cfg.SandboxExecPath = os.Getenv("CROJ_TEST_SANDBOX_EXEC")
+	cfg.DefaultExecuteTimeLimit = 3 * time.Second
+	cfg.DefaultExecuteMemoryLimit = 64 * 1024 * 1024
+	pidFile := cfg.WorkingDir + "/daemon.pid"
+
+	result := NewExecutor(cfg).Execute(
+		context.Background(),
+		[]string{
+			"/bin/sh",
+			"-c",
+			"sleep 300 </dev/null >/dev/null 2>&1 & echo $! > daemon.pid",
+		},
+		nil,
+		nil,
+	)
+	if result.Status != StatusAccepted {
+		t.Fatalf("daemon parent failed: %+v", result)
+	}
+	rawPID, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read daemon PID: %v", err)
+	}
+	daemonPID, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	if err != nil {
+		t.Fatalf("parse daemon PID %q: %v", rawPID, err)
+	}
+	t.Cleanup(func() { _ = unix.Kill(daemonPID, syscall.SIGKILL) })
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err = unix.Kill(daemonPID, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("probe daemon PID %d: %v", daemonPID, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon PID %d survived executor cleanup", daemonPID)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

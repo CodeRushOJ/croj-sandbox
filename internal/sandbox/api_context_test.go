@@ -7,6 +7,31 @@ import (
 	"time"
 )
 
+func TestExecuteContextUsesLanguageCompileBudget(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.HostTempDir = t.TempDir()
+	recorder := &deadlineRecordingCommandExecutor{}
+	api := &SandboxAPI{
+		runner: &Runner{cfg: cfg, compiler: recorder},
+		cfg:    cfg,
+	}
+
+	api.ExecuteContext(context.Background(), Request{
+		Language:   "go",
+		SourceCode: "package main\nfunc main() {}",
+	})
+
+	if recorder.remaining < 235*time.Second {
+		t.Fatalf("Go compiler context remaining = %v, want at least 235s", recorder.remaining)
+	}
+}
+
+func TestUnaryWallClockLimitRemainsServerBounded(t *testing.T) {
+	if got := requestWallClockLimit(10*time.Minute, 30*time.Second); got != 5*time.Minute {
+		t.Fatalf("unary wall clock limit = %v, want 5m", got)
+	}
+}
+
 func TestExecuteContextPropagatesCancellationToExecutor(t *testing.T) {
 	cfg := Config{
 		HostTempDir:               t.TempDir(),
@@ -49,6 +74,24 @@ type contextWaitingCommandExecutor struct {
 	started chan struct{}
 	done    chan struct{}
 	err     error
+}
+
+type deadlineRecordingCommandExecutor struct {
+	remaining time.Duration
+}
+
+func (executor *deadlineRecordingCommandExecutor) Execute(
+	ctx context.Context,
+	_ []string,
+	_ map[string]string,
+	_ *string,
+) Result {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return NewResult(StatusSandboxError, errors.New("compiler context has no deadline"))
+	}
+	executor.remaining = time.Until(deadline)
+	return NewResult(StatusSandboxError, errors.New("stop after recording deadline"))
 }
 
 func (executor *contextWaitingCommandExecutor) Execute(

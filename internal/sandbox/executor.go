@@ -34,7 +34,7 @@ func NewExecutor(cfg Config) *Executor {
 // runCmd: Command and arguments to execute (already processed for placeholders)
 // env: Optional environment variables
 // stdinData: Optional standard input data
-func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]string, stdinData *string) Result {
+func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]string, stdinData *string) (result Result) {
 	if len(runCmd) == 0 {
 		return NewResult(StatusSandboxError, fmt.Errorf("empty command provided to executor"))
 	}
@@ -161,9 +161,11 @@ func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]
 			return NewResult(StatusSandboxError, fmt.Errorf("configure request cgroup: %w", err))
 		}
 		defer func() {
-			if err := security.CleanupCgroups(cgroupManager); err != nil {
+			cleanupErr := security.CleanupCgroups(cgroupManager)
+			if cleanupErr != nil {
 				util.WarnLog("sandbox event=cgroup_cleanup_failed category=resource_isolation")
 			}
+			result = resultAfterCgroupCleanup(result, cleanupErr)
 		}()
 	} else {
 		terminateUnreadyProcess(execCmd)
@@ -231,7 +233,7 @@ func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]
 	}
 
 	// 构建结果
-	result := Result{
+	result = Result{
 		ExitCode:       0, // Will be set below if available
 		TimeUsedMillis: duration.Milliseconds(),
 		MemoryUsedKB:   procStats.MemoryKB,
@@ -305,6 +307,16 @@ func (e *Executor) Execute(ctx context.Context, runCmd []string, env map[string]
 	}
 
 	return result
+}
+
+func resultAfterCgroupCleanup(result Result, cleanupErr error) Result {
+	if cleanupErr == nil {
+		return result
+	}
+	return NewResult(
+		StatusSandboxError,
+		fmt.Errorf("cleanup request cgroup process tree: %w", cleanupErr),
+	)
 }
 
 func prepareRequestWorkingDirectory(path string, pid int) error {

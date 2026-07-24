@@ -23,6 +23,90 @@ func TestBatchWallClockLimit(t *testing.T) {
 	}
 }
 
+func TestExecuteBatchUsesLanguageCompileBudget(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.HostTempDir = t.TempDir()
+	recorder := &deadlineRecordingCommandExecutor{}
+	api := &SandboxAPI{
+		runner: &Runner{cfg: cfg, compiler: recorder},
+		cfg:    cfg,
+	}
+
+	api.ExecuteBatch(context.Background(), BatchRequest{
+		Language:   "go",
+		SourceCode: "package main\nfunc main() {}",
+		Cases:      []BatchCaseRequest{{ID: "case-1"}},
+	}, func(BatchCaseResponse) error { return nil })
+
+	if recorder.remaining < 235*time.Second {
+		t.Fatalf("Go batch compiler context remaining = %v, want at least 235s", recorder.remaining)
+	}
+}
+
+func TestRunBatchPreservesRequestedPerCaseMemoryLimit(t *testing.T) {
+	tests := []struct {
+		requestedMiB int
+		wantBytes    int64
+	}{
+		{requestedMiB: 64, wantBytes: 64 << 20},
+		{requestedMiB: 1024, wantBytes: 1 << 30},
+		{requestedMiB: 2048, wantBytes: 1 << 30},
+	}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("%dMiB", test.requestedMiB), func(t *testing.T) {
+			cfg := Config{
+				HostTempDir:               t.TempDir(),
+				DefaultCompileTimeLimit:   time.Second,
+				DefaultExecuteTimeLimit:   time.Second,
+				DefaultExecuteMemoryLimit: int64(DefaultMemoryLimitMB) << 20,
+				MaxStdoutSize:             1024,
+				MaxStderrSize:             1024,
+				Languages: map[string]LanguageConfig{"test": {
+					Compile: CompileConfig{SrcName: "main.src"},
+					Run: RunConfig{
+						Command:  "test-runner --memory-kb {{MAX_MEM}}",
+						MemoryMB: DefaultMemoryLimitMB,
+					},
+				}},
+			}
+			executor := &commandCapturingExecutor{}
+			runner := &Runner{cfg: cfg, executor: executor}
+			api := &SandboxAPI{runner: runner, cfg: cfg}
+			result := api.ExecuteBatch(
+				context.Background(),
+				BatchRequest{
+					Language:    "test",
+					SourceCode:  "source",
+					MemoryLimit: &test.requestedMiB,
+					Cases:       []BatchCaseRequest{{ID: "case-1"}},
+				},
+				func(BatchCaseResponse) error { return nil },
+			)
+			if result.Status != string(StatusAccepted) {
+				t.Fatalf("batch result = %+v", result)
+			}
+			want := fmt.Sprintf("[test-runner --memory-kb %d]", test.wantBytes/1024)
+			if got := fmt.Sprint(executor.command); got != want {
+				t.Fatalf("run command = %s, want %s", got, want)
+			}
+		})
+	}
+}
+
+type commandCapturingExecutor struct {
+	command []string
+}
+
+func (executor *commandCapturingExecutor) Execute(
+	_ context.Context,
+	command []string,
+	_ map[string]string,
+	_ *string,
+) Result {
+	executor.command = append([]string(nil), command...)
+	return Result{Status: StatusAccepted, ExitCode: 0}
+}
+
 func TestRunBatchStopsOnTokenHashMismatchWithoutRawExpectedOutput(t *testing.T) {
 	cfg := Config{
 		HostTempDir:               t.TempDir(),

@@ -86,7 +86,10 @@ func (r *Runner) RunWithConfig(ctx context.Context, language, sourceCode string,
 
 	// --- 5. Execute Step ---
 	util.InfoLog("sandbox event=execute_started language=%s", language)
-	memLimitBytes := langCfg.GetMemoryLimit(cfg.DefaultExecuteMemoryLimit)
+	memLimitBytes := langCfg.GetMemoryLimit(
+		cfg.DefaultExecuteMemoryLimit,
+		cfg.UserSpecifiedMemoryLimit,
+	)
 	memLimitKB := memLimitBytes / 1024
 
 	// 从语言配置中获取运行时间限制，但考虑用户是否指定了超时

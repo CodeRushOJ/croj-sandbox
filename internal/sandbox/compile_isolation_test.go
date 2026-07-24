@@ -130,12 +130,12 @@ func TestCompilerConfigUsesIndependentMemoryBudget(t *testing.T) {
 	cfg.DefaultExecuteMemoryLimit = 64 * 1024 * 1024
 	cfg.DefaultCompileMemoryLimit = 1024 * 1024 * 1024
 
-	compileCfg := isolatedCompilerConfig(cfg, "go", t.TempDir(), 90*time.Second)
+	compileCfg := isolatedCompilerConfig(cfg, "go", t.TempDir(), 240*time.Second)
 
 	if got, want := compileCfg.DefaultExecuteMemoryLimit, int64(1024*1024*1024); got != want {
 		t.Fatalf("compiler memory limit = %d, want %d", got, want)
 	}
-	if got, want := compileCfg.DefaultExecuteTimeLimit, 90*time.Second; got != want {
+	if got, want := compileCfg.DefaultExecuteTimeLimit, 240*time.Second; got != want {
 		t.Fatalf("compiler timeout = %v, want %v", got, want)
 	}
 	if got := cfg.DefaultExecuteMemoryLimit; got != 64*1024*1024 {
