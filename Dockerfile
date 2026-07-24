@@ -1,7 +1,9 @@
 # Dockerfile for croj-sandbox api-server
 
 # Stage 1: Build the application
-FROM golang:1.24.6-bookworm AS builder
+FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS builder
+
+ARG GOPROXY=https://proxy.golang.org,direct
 
 # Install necessary build dependencies, including libseccomp for seccomp support
 # Cgroup v2 support is primarily kernel-level; the target node must support it.
@@ -14,7 +16,7 @@ WORKDIR /app
 
 # Copy go module files and download dependencies first to leverage Docker cache
 COPY go.mod go.sum ./
-RUN go mod download
+RUN GOPROXY="${GOPROXY}" go mod download
 
 # Copy the rest of the application source code
 COPY . .
@@ -25,7 +27,7 @@ RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o /api-server ./cmd/api-
     && CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o /sandbox-exec ./cmd/sandbox-exec
 
 # Stage 2: Create the final minimal image
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 # Install runtime libraries and the C++, Python, Java and JavaScript toolchains.
 # The Go toolchain is copied from the pinned builder stage below.

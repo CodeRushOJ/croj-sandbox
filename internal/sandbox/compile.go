@@ -39,12 +39,14 @@ func (r *Runner) compileArtifact(
 		executableName += ".exe"
 	}
 	compiledPath = filepath.Join(hostRunDir, executableName)
+	compileTimeout := langCfg.GetCompileTimeout(cfg.DefaultCompileTimeLimit)
+	compileCfg := isolatedCompilerConfig(cfg, language, hostRunDir, compileTimeout)
 	compileCommand := util.ProcessCommandString(langCfg.Compile.CompileCommand, map[string]string{
 		PlaceholderSrcPath:   sourceFilePath,
 		PlaceholderExePath:   compiledPath,
 		PlaceholderWorkDir:   hostRunDir,
 		PlaceholderExeDir:    filepath.Dir(compiledPath),
-		PlaceholderMaxMemory: fmt.Sprintf("%d", cfg.DefaultExecuteMemoryLimit/1024),
+		PlaceholderMaxMemory: fmt.Sprintf("%d", compileCfg.DefaultExecuteMemoryLimit/1024),
 	})
 	if compileCommand == "" {
 		return "", "", NewResult(
@@ -53,15 +55,9 @@ func (r *Runner) compileArtifact(
 		)
 	}
 
-	compileTimeout := langCfg.GetCompileTimeout(cfg.DefaultCompileTimeLimit)
 	compileCtx, cancel := context.WithTimeout(ctx, compileTimeout)
 	defer cancel()
 
-	compileCfg := cfg
-	compileCfg.Language = language
-	compileCfg.WorkingDir = hostRunDir
-	compileCfg.DefaultExecuteTimeLimit = compileTimeout
-	compileCfg.UserSpecifiedTimeout = true
 	compiler := r.compiler
 	if compiler == nil {
 		compiler = NewExecutor(compileCfg)
@@ -131,4 +127,17 @@ func (r *Runner) compileArtifact(
 		result.CompileOutput = compileOutput
 		return "", compileOutput, result
 	}
+}
+
+func isolatedCompilerConfig(cfg Config, language, workDir string, timeout time.Duration) Config {
+	compileCfg := cfg
+	compileCfg.Language = language
+	compileCfg.WorkingDir = workDir
+	compileCfg.DefaultExecuteTimeLimit = timeout
+	compileCfg.UserSpecifiedTimeout = true
+	compileCfg.DefaultExecuteMemoryLimit = cfg.DefaultCompileMemoryLimit
+	if compileCfg.DefaultExecuteMemoryLimit <= 0 {
+		compileCfg.DefaultExecuteMemoryLimit = int64(DefaultCompileMemoryLimitMB) * 1024 * 1024
+	}
+	return compileCfg
 }

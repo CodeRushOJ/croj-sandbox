@@ -80,7 +80,7 @@ API Server 使用命令行参数：
 | `-languages` | `go,cpp,python,java,javascript` | 允许的语言列表 |
 | `-max-concurrency` | 当前进程 `GOMAXPROCS`，至少为 `1` | 每个 Pod 同时进行的编译/执行数，显式值必须大于 `0` |
 
-默认编译超时为 30 秒；Go 因独立 UID、私有构建缓存以及同一 worker 上的并发冷编译使用 90 秒预算。默认内存限制为 512 MiB，stdout 与 stderr 各限制 64 KiB。请求可以缩短或调整执行限制；内存请求上限由服务端限制为 4 GiB。
+默认编译超时为 30 秒；Go 因独立 UID、私有构建缓存以及同一 worker 上的并发冷编译使用 90 秒预算。编译器使用独立的 1 GiB cgroup 内存预算，不受题目运行内存限制影响；参赛程序默认限制仍为 512 MiB。stdout 与 stderr 各限制 64 KiB。请求可以缩短或调整执行限制；运行内存请求上限由服务端限制为 4 GiB。
 
 ### 并发与背压
 
@@ -118,7 +118,7 @@ API Server 使用命令行参数：
 构建依赖：
 
 - Docker 29+（推荐，避免污染本机工具链）
-- 或 Go 1.24、C 编译器、`libseccomp-dev`
+- 或 Go 1.25+、C 编译器、`libseccomp-dev`（CI 与镜像固定使用 Go 1.26.5）
 
 ```bash
 # 编译测试环境和 api-server，不启动服务
@@ -130,6 +130,14 @@ docker run --rm coderushoj/croj-sandbox:builder go vet ./...
 
 # 构建包含五种语言运行时的最终镜像
 docker build -t coderushoj/croj-sandbox:dev .
+```
+
+网络无法访问默认 Go module proxy 时，可只在构建阶段覆盖代理；该值不会写入最终镜像：
+
+```bash
+docker build \
+  --build-arg GOPROXY=https://goproxy.cn,direct \
+  -t coderushoj/croj-sandbox:dev .
 ```
 
 如本机已安装完整依赖，可直接运行：

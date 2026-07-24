@@ -18,6 +18,7 @@ const (
 	// --- Default Execution Limits ---
 	DefaultCompileTimeLimitSec = 30  // Includes cold, isolated toolchain startup.
 	DefaultExecuteTimeLimitSec = 3   // Default execution timeout in seconds
+	DefaultCompileMemoryLimitMB = 1024
 	DefaultMaxStdoutKB         = 64  // Default max stdout size in KB
 	DefaultMaxStderrKB         = 64  // Default max stderr size in KB
 	DefaultMemoryLimitMB       = 512 // Default memory limit in MB
@@ -87,6 +88,7 @@ type Config struct {
 	WorkingDir                string                    `json:"-"`
 	SandboxExecPath           string                    `json:"sandboxExecPath"`
 	DefaultCompileTimeLimit   time.Duration             `json:"defaultCompileTimeLimit"`
+	DefaultCompileMemoryLimit int64                     `json:"defaultCompileMemoryLimit"`
 	DefaultExecuteTimeLimit   time.Duration             `json:"defaultExecuteTimeLimit"`
 	DefaultExecuteMemoryLimit int64                     `json:"defaultExecuteMemoryLimit"`
 	MaxStdoutSize             int64                     `json:"maxStdoutSize"`
@@ -117,6 +119,7 @@ func DefaultConfig() Config {
 		HostTempDir:               DefaultHostTempDir,
 		SandboxExecPath:           DefaultSandboxExecPath,
 		DefaultCompileTimeLimit:   time.Duration(DefaultCompileTimeLimitSec) * time.Second,
+		DefaultCompileMemoryLimit: int64(DefaultCompileMemoryLimitMB) * 1024 * 1024,
 		DefaultExecuteTimeLimit:   time.Duration(DefaultExecuteTimeLimitSec) * time.Second,
 		DefaultExecuteMemoryLimit: int64(DefaultMemoryLimitMB) * 1024 * 1024,
 		MaxStdoutSize:             int64(DefaultMaxStdoutKB) * 1024,

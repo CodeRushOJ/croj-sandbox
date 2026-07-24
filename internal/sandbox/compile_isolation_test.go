@@ -124,3 +124,21 @@ func TestRunWithConfigFailsClosedWhenCompilerIsolationFails(t *testing.T) {
 		t.Fatalf("runtime executor calls = %d, want 0", runtimeExecutor.calls)
 	}
 }
+
+func TestCompilerConfigUsesIndependentMemoryBudget(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DefaultExecuteMemoryLimit = 64 * 1024 * 1024
+	cfg.DefaultCompileMemoryLimit = 1024 * 1024 * 1024
+
+	compileCfg := isolatedCompilerConfig(cfg, "go", t.TempDir(), 90*time.Second)
+
+	if got, want := compileCfg.DefaultExecuteMemoryLimit, int64(1024*1024*1024); got != want {
+		t.Fatalf("compiler memory limit = %d, want %d", got, want)
+	}
+	if got, want := compileCfg.DefaultExecuteTimeLimit, 90*time.Second; got != want {
+		t.Fatalf("compiler timeout = %v, want %v", got, want)
+	}
+	if got := cfg.DefaultExecuteMemoryLimit; got != 64*1024*1024 {
+		t.Fatalf("runtime memory limit mutated to %d", got)
+	}
+}

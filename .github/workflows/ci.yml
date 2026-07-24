@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  security-events: write
 
 jobs:
   test:
@@ -17,7 +18,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: 1.24.6
+          go-version: 1.26.5
           cache: true
       - name: Install libseccomp headers
         run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
@@ -25,6 +26,8 @@ jobs:
         run: go test -race -timeout=10m ./...
       - name: Vet
         run: go vet ./...
+      - name: Scan reachable Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
       - name: Build binaries
         run: |
           CGO_ENABLED=1 go build -trimpath -o /tmp/api-server ./cmd/api-server
@@ -42,3 +45,38 @@ jobs:
             command -v java
             command -v node
           '
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: coderushoj/croj-sandbox:ci
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+      - name: Upload SPDX SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sandbox-sbom-${{ github.sha }}
+          path: sbom.spdx.json
+          if-no-files-found: error
+      - name: Generate Trivy SARIF report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: coderushoj/croj-sandbox:ci
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+      - name: Upload Trivy SARIF
+        if: ${{ always() && hashFiles('trivy-results.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4
+        with:
+          sarif_file: trivy-results.sarif
+      - name: Fail on fixed HIGH or CRITICAL image vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: coderushoj/croj-sandbox:ci
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
