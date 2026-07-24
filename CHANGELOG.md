@@ -27,6 +27,7 @@
 
 ### Fixed
 
+- 修复进程监控在后台 goroutine 仍写入统计数据时提前返回导致的竞态，并确保自然退出、超时和取消路径均返回最终快照
 - 限制 batch 编译诊断内存并去除 `error`/`compile_error` 重复载荷，避免大输出触发 OOM 或错误重试
 - token checker 改用规范化 token 序列 SHA-256 在 sandbox 内判定，原始 expected 不跨服务边界且恢复首错早停
 - 修复 cgroup v2 清理被误判为 v1 的问题
