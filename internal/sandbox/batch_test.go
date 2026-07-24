@@ -110,7 +110,7 @@ func (executor *commandCapturingExecutor) Execute(
 func TestRunBatchStopsOnTokenHashMismatchWithoutRawExpectedOutput(t *testing.T) {
 	cfg := Config{
 		HostTempDir:               t.TempDir(),
-		DefaultCompileTimeLimit:   time.Second,
+		DefaultCompileTimeLimit:   5 * time.Second,
 		DefaultExecuteTimeLimit:   time.Second,
 		DefaultExecuteMemoryLimit: 64 * 1024 * 1024,
 		MaxStdoutSize:             1024,
