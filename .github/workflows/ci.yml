@@ -98,7 +98,7 @@ jobs:
           exit-code: "1"
 
   publish-image:
-    name: Publish signed release image
+    name: Publish attested release image
     if: ${{ github.ref_type == 'tag' }}
     needs: test
     runs-on: ubuntu-24.04
@@ -106,19 +106,21 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     steps:
       - name: Check out the complete tag history
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-      - name: Verify signed SemVer release tag
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Verify annotated SemVer release tag
         run: |
           [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          tag_object="$(git rev-parse "$GITHUB_REF_NAME^{tag}")"
-          test "$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag_object" --jq .verification.verified)" = true
+          git rev-parse "$GITHUB_REF_NAME^{tag}" >/dev/null
           test "$(git rev-parse "$GITHUB_REF_NAME^{commit}")" = "$GITHUB_SHA"
+          git fetch --no-tags origin main
+          test "$GITHUB_SHA" = "$(git rev-parse origin/main)"
+      - name: Set up QEMU for cross-architecture builds
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Log in to GHCR
@@ -145,6 +147,12 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
+      - name: Attest image provenance with GitHub OIDC
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+        with:
+          subject-name: ghcr.io/coderushoj/croj-sandbox
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
       - name: Record immutable image manifest
         env:
           IMAGE_REPOSITORY: ghcr.io/coderushoj/croj-sandbox

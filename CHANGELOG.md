@@ -6,7 +6,7 @@
 
 ### Added
 
-- 签名 SemVer tag 发布双架构 GHCR 镜像、BuildKit SBOM/max provenance，以及供平台 digest-only 发布使用的不可变镜像 JSON 清单。
+- Annotated SemVer tag 发布双架构 GHCR 镜像、BuildKit SBOM/max provenance、GitHub OIDC keyless provenance，以及供平台 digest-only 发布使用的不可变镜像 JSON 清单。
 - 增加版本化 server-streaming `ExecuteBatchV1`：一个请求只编译一次，按序返回最多 256 个测试点结果并保留旧 `Execute` 兼容接口
 - 增加 batch 单次 admission、context 取消、编译产物确定性清理和 stream panic recovery
 - 增加 compile-counter、事件顺序、清理与流式 handler 回归测试
@@ -32,7 +32,7 @@
 - 删除 ZooKeeper 注册与客户端发现，调度统一交给 Kubernetes EndpointSlice
 - cgroup v2 在父级正确委派 memory/cpu/pids controller，并按 Pod UID 隔离 cgroup 名称
 - Go 构建与运行工具链升级至 1.26.5，Java 镜像从 JRE 改为 JDK 17
-- gRPC 升级至 1.82.1、`x/net` 升级至 0.55.0，修复 GitHub Dependabot 与镜像扫描报告的 Critical/High/Medium 漏洞
+- gRPC 升级至 1.82.1、`x/net` 升级至 0.56.0、`x/text` 升级至 0.39.0，并联动 `x/sys` 0.46.0，修复 GitHub Dependabot、Go vulnerability database 与镜像扫描报告的 Critical/High/Medium 漏洞
 - sandbox 日志改为稳定的 `event`/`category` 与有界指标；verbose CLI 日志只显示响应字段长度和执行元数据
 - 编译器与用户程序统一通过 fail-closed 执行器；cgroup、launcher 或 seccomp 不可用时不再降级执行
 - 请求 cgroup 固定创建在 worker Pod 自身 cgroup 下，并要求统一 cgroup v2
