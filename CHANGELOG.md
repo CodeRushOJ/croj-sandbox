@@ -39,6 +39,7 @@
 
 ### Fixed
 
+- 修复 release job 在 annotated tag push 时因旧版 checkout 将 runner 本地标签覆盖为 peeled commit、导致 `^{tag}` 校验失败的问题。
 - Batch 遇到任意 `SandboxError` 都会无条件停止，不再因 `stopOnFailure=false` 继续执行后续 case 或错误发送 `COMPLETED`
 - JSON、进程内和 Batch 兼容 API 在 MiB 域先限制到 1 GiB 再换算字节，超大正整数不能通过溢出关闭 `memory.max`
 - 退出和取消路径使用 `cgroup.kill` 清理整个请求进程树，等待 `populated=0` 后删除 cgroup，避免父进程退出后 daemon 子进程逃逸
