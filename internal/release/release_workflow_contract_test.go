@@ -73,3 +73,33 @@ func TestReleaseCheckoutPreservesAnnotatedTagObject(t *testing.T) {
 		t.Errorf("test and publish-image jobs must use the same pinned checkout v6 action")
 	}
 }
+
+func TestPublishJobGrantsPermissionsRequiredForAttestedImages(t *testing.T) {
+	workflowBytes, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(workflowBytes)
+	publishJobStart := strings.Index(workflow, "\n  publish-image:")
+	if publishJobStart == -1 {
+		t.Fatal("release workflow is missing the publish-image job")
+	}
+	publishJob := workflow[publishJobStart:]
+	permissionsStart := strings.Index(publishJob, "\n    permissions:")
+	stepsStart := strings.Index(publishJob, "\n    steps:")
+	if permissionsStart == -1 || stepsStart == -1 || permissionsStart >= stepsStart {
+		t.Fatal("publish-image job must define scoped permissions before its steps")
+	}
+	permissions := publishJob[permissionsStart:stepsStart]
+
+	for _, required := range []string{
+		"contents: read",
+		"packages: write",
+		"id-token: write",
+		"attestations: write",
+	} {
+		if !strings.Contains(permissions, required) {
+			t.Errorf("publish-image permissions are missing %q", required)
+		}
+	}
+}
