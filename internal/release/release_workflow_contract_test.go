@@ -43,3 +43,33 @@ func TestAnnotatedTagPublishesOidcAttestedMultiArchitectureImage(t *testing.T) {
 		t.Error("release workflow must use keyless OIDC provenance instead of requiring a local tag signing key")
 	}
 }
+
+func TestReleaseCheckoutPreservesAnnotatedTagObject(t *testing.T) {
+	workflowBytes, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(workflowBytes)
+	publishJobStart := strings.Index(workflow, "\n  publish-image:")
+	if publishJobStart == -1 {
+		t.Fatal("release workflow is missing the publish-image job")
+	}
+	testJob := workflow[:publishJobStart]
+	publishJob := workflow[publishJobStart:]
+	const pinnedCheckoutV6 = `uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6`
+
+	for _, required := range []string{
+		pinnedCheckoutV6,
+		`git rev-parse "$GITHUB_REF_NAME^{tag}" >/dev/null`,
+		`test "$(git rev-parse "$GITHUB_REF_NAME^{commit}")" = "$GITHUB_SHA"`,
+		`git fetch --no-tags origin main`,
+		`test "$GITHUB_SHA" = "$(git rev-parse origin/main)"`,
+	} {
+		if !strings.Contains(publishJob, required) {
+			t.Errorf("publish-image job is missing %q", required)
+		}
+	}
+	if !strings.Contains(testJob, pinnedCheckoutV6) {
+		t.Errorf("test and publish-image jobs must use the same pinned checkout v6 action")
+	}
+}
