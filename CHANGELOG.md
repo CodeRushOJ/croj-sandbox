@@ -6,6 +6,7 @@
 
 ### Added
 
+- 签名 SemVer tag 发布双架构 GHCR 镜像、BuildKit SBOM/max provenance，以及供平台 digest-only 发布使用的不可变镜像 JSON 清单。
 - 增加版本化 server-streaming `ExecuteBatchV1`：一个请求只编译一次，按序返回最多 256 个测试点结果并保留旧 `Execute` 兼容接口
 - 增加 batch 单次 admission、context 取消、编译产物确定性清理和 stream panic recovery
 - 增加 compile-counter、事件顺序、清理与流式 handler 回归测试

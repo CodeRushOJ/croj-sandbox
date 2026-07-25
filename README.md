@@ -132,6 +132,8 @@ docker run --rm coderushoj/croj-sandbox:builder go vet ./...
 docker build -t coderushoj/croj-sandbox:dev .
 ```
 
+推送经过 GitHub 验证的 annotated `vX.Y.Z` tag 后，CI 会在完整 race、隔离、govulncheck 与 Trivy 门禁通过后发布 `linux/amd64`、`linux/arm64` GHCR manifest，并附带 BuildKit SBOM、max provenance 与 `sandbox-image.json` digest 清单。平台部署只固定该不可变 manifest digest。
+
 网络无法访问默认 Go module proxy 时，可只在构建阶段覆盖代理；该值不会写入最终镜像：
 
 ```bash
@@ -199,7 +201,7 @@ spec:
           port: 50051
 ```
 
-`deploy/deployment.yaml` 使用 `coderushoj/croj-sandbox:dev`，只面向本机 Kind；正式镜像版本和生产级工作负载仍需在 `croj-platform` Helm chart 中完成安全加固后发布。`croj-judging-server` 只需要 EndpointSlice 的 `list` 权限，不需要访问 Pod 或 Kubernetes Endpoints API。
+`deploy/deployment.yaml` 使用 `coderushoj/croj-sandbox:dev`，只面向本机 Kind；正式镜像由签名 SemVer tag 构建，生产级工作负载由 `croj-platform` Helm chart 以 digest 固定。`croj-judging-server` 只需要 EndpointSlice 的 `list` 权限，不需要访问 Pod 或 Kubernetes Endpoints API。
 
 平台 Helm follow-up：在 `sandbox.args` 的 nsenter 分隔符和 `/app/api-server` 之后追加 `-max-concurrency=N`，并让 `N × 1 GiB` 低于 sandbox Pod memory limit，明确保留 supervisor 与 page cache 余量；当前 2 GiB Pod 必须使用 `N=1`。参数缺失时使用运行时 CPU 默认值；`0` 或负数会使 API Server 启动失败，避免无界或含糊配置。Pod termination grace 不应低于 30 秒：服务内固定使用其中最多 25 秒 drain，剩余时间留给 kubelet 和容器运行时完成退出。
 
