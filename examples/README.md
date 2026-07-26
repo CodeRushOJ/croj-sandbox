@@ -7,8 +7,7 @@
 使用 simple-client 工具运行示例代码并比较输出：
 
 ```bash
-# 编译客户端工具
-cd /Users/zfhe/mywork/croj/croj-sandbox
+# 在 clone 后的 croj-sandbox 仓库根目录编译客户端工具
 go build -o simple-client cmd/simple-client/main.go
 
 # 运行 Go 示例并比较输出
